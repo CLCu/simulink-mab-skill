@@ -1,0 +1,67 @@
+{
+  "schema_version": "2.0",
+  "standard": "TARGET_MODELING_GUIDELINE_V5",
+  "profiles": [
+    "NA-MAAB",
+    "JMAAB"
+  ],
+  "matlab_version": "R2025b",
+  "source": "project-template-placeholder",
+  "_note": "此文件保存项目决定值，不代表目标规范强制数值。真实项目应把 source 改为项目模板、配置库或批准文件。",
+  "grid": {
+    "value": 10,
+    "status": "provisional",
+    "rule_context": [
+      "na_0004"
+    ]
+  },
+  "block": {
+    "preferred_width": 40,
+    "preferred_height": 40,
+    "status": "layout-default",
+    "recognizability": "jm_0002 requires visual confirmation and has no numeric target-standard threshold"
+  },
+  "spacing": {
+    "horizontal": 60,
+    "vertical": 40,
+    "branch": 20,
+    "status": "provisional",
+    "purpose": "avoid overlapping lines, labels and blocks"
+  },
+  "font": {
+    "block_name": {
+      "name": "Arial",
+      "size": 10,
+      "status": "provisional"
+    },
+    "signal_name": {
+      "name": "Arial",
+      "size": 10,
+      "status": "provisional"
+    },
+    "stateflow_label": {
+      "name": "Arial",
+      "size": 10,
+      "status": "provisional"
+    }
+  },
+  "appearance": {
+    "shadow": false,
+    "block_name_placement": "below",
+    "show_block_annotation": false,
+    "display_options": {},
+    "status": "provisional"
+  },
+  "line_crossing": {
+    "required_on_crossing": "line hop",
+    "source_rule": "db_0032-a2",
+    "observed_from_model": false,
+    "note": "不得用此 profile 值代替模型/环境实际设置"
+  },
+  "layout": {
+    "flow": "left-to-right",
+    "parallel_order": "top-to-bottom",
+    "max_branch_per_point_jmaab": 2,
+    "max_unnecessary_bends": null
+  }
+}
