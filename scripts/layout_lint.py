@@ -86,6 +86,7 @@ class Report:
         self.source = source
         self.items: list[dict[str, Any]] = []
         self.schema_errors: list[str] = []
+        self.line_metrics: list[dict[str, Any]] = []
 
     def add(
         self,
@@ -150,9 +151,11 @@ class Report:
             "schema_errors": self.schema_errors,
             "profile_summary": self.profile_summary(),
             "items": self.items,
+            "line_metrics": self.line_metrics,
             "coverage": {
                 "full_chapter_audit": False,
                 "label_geometry": "estimated (font-size based); confirm with render_check.m PNGs",
+                "line_metrics": "direction changes and raw polyline length in geometry coordinate units",
                 "note": (
                     "This lint covers deterministic Simulink geometry rules only; "
                     "db_0097 label checks are font-size estimates, not rendered "
@@ -175,6 +178,30 @@ def center(value: tuple[float, float, float, float]) -> tuple[float, float]:
 def segments(points: list[Any]) -> list[tuple[tuple[float, float], tuple[float, float]]]:
     pts = [(float(point[0]), float(point[1])) for point in points]
     return list(zip(pts, pts[1:]))
+
+
+def polyline_length(points: list[Any]) -> float:
+    """Return raw path length in geometry coordinate units."""
+    pts = [(float(point[0]), float(point[1])) for point in points]
+    return sum(
+        math.hypot(end[0] - start[0], end[1] - start[1])
+        for start, end in zip(pts, pts[1:])
+    )
+
+
+def bend_count(points: list[Any]) -> int:
+    """Count direction changes, ignoring duplicate and collinear vertices."""
+    pts = [(float(point[0]), float(point[1])) for point in points]
+    directions = []
+    for start, end in zip(pts, pts[1:]):
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        length = math.hypot(dx, dy)
+        if length > TOL:
+            directions.append((dx / length, dy / length))
+    return sum(
+        first[0] * second[0] + first[1] * second[1] < 1 - 1e-6
+        for first, second in zip(directions, directions[1:])
+    )
 
 
 def is_horizontal(segment) -> bool:
@@ -265,8 +292,15 @@ def line_crossing_setting(geometry: dict[str, Any]) -> tuple[bool | None, str]:
     item = settings.get("line_crossing") or {}
     if item.get("status") != "observed" or item.get("value") is None:
         return None, str(item.get("reason") or "R2025b setting was not observed")
-    normalized = "".join(ch for ch in str(item["value"]).lower() if ch.isalnum())
-    return normalized in {"hop", "linehop", "true", "1", "on"}, str(item["value"])
+    raw = str(item["value"])
+    normalized = "".join(ch for ch in raw.lower() if ch.isalnum())
+    display = str(item.get("display_value") or raw)
+    evidence = raw if display == raw else f"{display} ({raw})"
+    if normalized in {"hop", "linehop", "true", "1", "on"}:
+        return True, evidence
+    if normalized in {"gradpin", "tunnel", "none", "false", "0", "off"}:
+        return False, evidence
+    return None, f"unrecognized EditorPathXStyle value: {raw}"
 
 
 # ---------------------------------------------------------------------------
@@ -575,8 +609,19 @@ def lint(geo: dict[str, Any], profile: dict[str, Any], source: str) -> Report:
             {
                 **line,
                 "segs": segments(points) if len(points) >= 2 else [],
+                "bends": bend_count(points),
+                "length": polyline_length(points),
             }
         )
+    report.line_metrics = [
+        {
+            "id": line["id"],
+            "vertices": len(line.get("points") or []),
+            "bends": line["bends"],
+            "length": round(line["length"], 3),
+        }
+        for line in raw_lines
+    ]
     feedback = cycle_edges(raw_lines)
 
     # jm_0002 has no numeric target-standard threshold.
@@ -788,13 +833,13 @@ def lint(geo: dict[str, Any], profile: dict[str, Any], source: str) -> Report:
                 report.unknown(
                     "db_0032-a1",
                     where,
-                    f"交叉存在，但无法读取实际 line setting：{hop_value or 'unknown'}",
-                    "读取实际 R2025b 设置；不可用 profile 冒充模型设置",
+                    f"交叉存在，但无法确定实际 Line crossing style：{hop_value or 'unknown'}",
+                    "检查 get_param(0,'EditorPathXStyle')；不可用 profile 冒充实际设置",
                 )
                 report.unknown(
                     "db_0032-a2",
                     where,
-                    f"交叉存在，实际 line setting={hop_value or 'unknown'}",
+                    f"交叉存在，实际 EditorPathXStyle={hop_value or 'unknown'}",
                     "读取并记录实际 line crossing style",
                 )
     else:
@@ -867,7 +912,11 @@ def lint(geo: dict[str, Any], profile: dict[str, Any], source: str) -> Report:
 
     max_bends = profile.get("layout", {}).get("max_unnecessary_bends")
     bend_facts = ", ".join(
-        f"{line['id']}={max(0, len(line['segs']) - 1)}" for line in raw_lines
+        (
+            f"{line['id']}=B{line['bends']}"
+            f"(L={line['length']:.1f},vertices={len(line.get('points') or [])})"
+        )
+        for line in raw_lines
     )
     project_note = (
         f"；project max={max_bends} 仅作为项目阈值，不是目标规范数值"

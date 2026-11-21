@@ -1,11 +1,20 @@
 ---
 name: mab-modeling-guidelines
-description: 搭建或修改、新建 Simulink/Stateflow 模型，并按照目标建模规范（v5）第 3/4 章的相关要求优化块、连线、标签、层级和 Stateflow 图面的外观与可读性。适用于用户要求模型“布局规范”或“看起来符合目标建模规范或MAB建模规范”的建模任务；不用于全量规则合规审查、功能正确性验证或对已有模型做独立复查。
+description: 在 MATLAB R2025b 中搭建、修改或新建 Simulink/Stateflow 模型，并按照目标建模规范（v5）第 3/4 章的相关要求优化块、连线、标签、层级和 Stateflow 图面的外观与可读性。适用于用户要求模型“布局规范”、“看起来符合目标建模规范”或“MAB建模规范”的建模任务；当用户提出“搭建模型”或“搭建Simulink模型”时也应触发；不用于全量规则合规审查、功能正确性验证或对已有模型做独立复查。
 metadata:
   author: luchao
   date: "2026-11-21"
+  version: "1.2.0"
 ---
+
 # Simulink / Stateflow 外观布局（目标建模规范 v5）
+
+## 触发条件
+
+- 用户要求搭建、修改或新建 Simulink/Stateflow 模型时触发。
+- 用户明确提出“搭建模型”或“搭建Simulink模型”时触发。
+- 用户要求模型“布局规范”、“MAB建模规范”或图面外观与可读性符合目标建模规范时触发。
+- 仅要求复查已有模型、不要求修改或调整布局时，不进入本 Skill 的执行主链。
 
 ## 目标与边界
 
@@ -23,10 +32,10 @@ metadata:
 
 ## 工作路径
 
-| 任务                     | 必须读取                                                                                           | 执行重点                                                       |
-| ------------------------ | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| 任务 | 必须读取 | 执行重点 |
+| --- | --- | --- |
 | 搭建、修改或调整模型布局 | [satk-workflow.md](references/satk-workflow.md)、[layout-simulink.md](references/layout-simulink.md) | 规格与 plan → SATK 建结构 → 布局 → 几何检查 → 最终视觉复核 |
-| 涉及 Stateflow Chart     | 再读 [layout-stateflow.md](references/layout-stateflow.md)                                          | Chart 内部用 Stateflow scope 编辑，导出、lint 并检查最终 PNG   |
+| 涉及 Stateflow Chart | 再读 [layout-stateflow.md](references/layout-stateflow.md) | Chart 内部用 Stateflow scope 编辑，导出、lint 并检查最终 PNG |
 
 若请求仅要求复查已有模型，应停止并说明本 Skill 不覆盖该任务。已有模型只可在用户明确要求修改或调整布局时进入主链。
 

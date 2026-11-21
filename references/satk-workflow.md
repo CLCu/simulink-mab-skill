@@ -71,7 +71,20 @@ python scripts/layout_lint.py <scope_geometry.json>
 - `2`：schema 无效或仍有 `UNVERIFIABLE`。
 - 自动化不得把 `2` 当作通过。
 
-R2025b 没有可靠的编程接口读取实际 line-crossing style。存在交叉时，`db_0032-a2` 保持 `UNVERIFIABLE`，用最终渲染图复核；profile 中的 line hop 值不能证明模型实际启用。
+R2025b 的 line crossing style 是 Simulink 编辑器全局偏好，不是模型参数。导出器通过 `get_param(0,'EditorPathXStyle')` 读取实际值：`hop` 对应 `Line Hop`，`grad_pin` 对应 `Tunnel`，`none` 对应 `None`。存在交叉时，只有实际值为 `hop` 才满足 `db_0032-a2`；`layout-profile.json` 的值不能代替该读取结果。最终 PNG 仍需确认交叉确实存在且显示清楚。
+
+`layout_lint.py` 为每条导出信号线输出顶点数、方向变化次数（折弯数）和折线坐标长度。处理原则如下：
+
+| 诊断 | 判定意义 | 处理 |
+| --- | --- | --- |
+| 交叉点 | 报告交叉的两条线及交叉坐标；共享端点不冒充交叉 | 先移动输入/输出块、块顺序或重走正交线；仍有交叉时按 [layout-simulink.md](layout-simulink.md) 的项目策略逐条评估 `Goto/From`；最后才用 `Line Hop` 兜底 |
+| 共线重叠 | 不同信号线共享同一线段，直接违反 `db_0032-b` | 移动块或重走线路，必须分开；`Line hop` 不能修复重叠 |
+| 折弯数 | 线段方向变化次数，忽略重复点和共线冗余顶点 | 不按固定数字自动判违规；检查绕行和冗余转折并重新布局。例：5 次折弯先定位其来源，简化到保持语义和端口关系所需的最少转折，再重新导出、lint 和渲染 |
+| 折线长度 | 坐标单位下的路径总长，不是目标规范阈值 | 只用于前后对比和发现异常绕行；不能单独证明合规或违规 |
+
+`Goto/From` 是交叉治理的项目路由策略，不是新增的 MAAB 规则。每次转换一条候选线后都要重新导出、lint 和渲染；只有交叉与整体可读性均有净改善时，才继续评估下一条。必须检查 `na_0011-a` 的 Local 可见性、`jc_0602-a` 的名称一致性、`na_0008-b` 的标签要求，并避免破坏 `jc_0171-a` 要求的 structural subsystem 直接连接。`Inport → Goto` 本身允许，不得自动判违规。
+
+任何重走线路都通过 `arranging-simulink-layouts` 和 `model_edit` 完成。修复后必须重新导出几何、运行 lint 并生成最终 PNG，不能沿用修复前的图面证据。
 
 `db_0097` 的标签重叠只按项目字号估算，可能漏报。估算未发现冲突也不能关闭视觉规则，必须执行第 6 节的渲染复核。
 
@@ -133,7 +146,7 @@ python scripts/render_chart.py chart_geometry.json -o chart.render.png
 | `model_edit` partial | 仅修失败 scope，再执行 `model_read` + `model_check` |
 | plan 端口不匹配 | 回计划阶段修正；不得猜端口 |
 | 几何或 schema 失败 | fail-closed，修导出器/输入后重跑 |
-| line hop 不可读取 | 保持未验证，提交渲染图复核 |
+| `EditorPathXStyle` 读取失败或值无法识别 | 相关交叉保持未验证，提交渲染图复核 |
 | 渲染失败 | 修复渲染或转交责任人；相关视觉规则不得通过 |
 | Model Advisor/Model Check 未运行 | 相关规则保持 `UNVERIFIABLE` |
 | 修复循环无进展 | 停止并报告，不带着已知缺陷交付 |

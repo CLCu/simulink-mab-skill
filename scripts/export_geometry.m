@@ -111,7 +111,7 @@ for k = 1:numel(lineHandles)
     end
 end
 
-setting = readLineCrossingSetting(modelName);
+setting = readLineCrossingSetting();
 payload = struct();
 payload.schema_version = 'maab.simulink_geometry/v1';
 payload.standard = 'TARGET_MODELING_GUIDELINE_V5';
@@ -389,39 +389,44 @@ value = num2cell(value);
 end
 
 
-function setting = readLineCrossingSetting(modelName)
-% R2025b does not expose the canvas line-crossing style programmatically.
-% Verified dead ends (do not re-guess): Simulink.Preferences.get,
-% get_param(model|root,'LineCrossingStyle'), and the settings tree
-% (settings.Simulink.* has no LineCrossingStyle entry).
-% Therefore lint must keep db_0032-a2 UNVERIFIABLE on any crossing.
+function setting = readLineCrossingSetting()
+% Line crossing style is a Simulink editor preference, not a model parameter.
+% The UI label "Line crossing style" is exposed by the root object property
+% EditorPathXStyle. Its raw value uses codes such as grad_pin and hop.
 setting = struct( ...
     'status', 'unavailable', ...
     'value', '', ...
+    'display_value', '', ...
     'source', '', ...
-    'reason', ['R2025b 无编程接口读取 line-crossing style；' ...
-        '已验证无效路径: Simulink.Preferences.get / get_param(model|root) / settings 树。' ...
-        '存在交叉时 db_0032-a2 保持 UNVERIFIABLE，用 render_check 截图供人工签核。']);
-for k = 1:3
-    try
-        switch k
-            case 1
-                value = Simulink.Preferences.get('LineCrossingStyle');
-            case 2
-                value = get_param(modelName, 'LineCrossingStyle');
-            case 3
-                value = get_param(0, 'LineCrossingStyle');
-        end
-        if ~isempty(value)
-            setting.status = 'observed';
-            setting.value = char(string(value));
-            setting.source = sprintf('candidate_%d', k);
-            setting.reason = '';
-            return;
-        end
-    catch
-        % Fail closed: keep probing remaining candidates.
+    'reason', '');
+try
+    raw = get_param(0, 'EditorPathXStyle');
+    raw = char(string(raw));
+    if isempty(strtrim(raw))
+        setting.reason = 'get_param(0,''EditorPathXStyle'') returned an empty value.';
+        return;
     end
+    setting.status = 'observed';
+    setting.value = raw;
+    setting.display_value = lineCrossingDisplay(raw);
+    setting.source = 'get_param(0,''EditorPathXStyle'')';
+catch ME
+    setting.reason = sprintf( ...
+        'get_param(0,''EditorPathXStyle'') failed: %s', ME.message);
+end
+end
+
+
+function displayValue = lineCrossingDisplay(rawValue)
+switch lower(strtrim(rawValue))
+    case 'hop'
+        displayValue = 'Line Hop';
+    case 'grad_pin'
+        displayValue = 'Tunnel';
+    case 'none'
+        displayValue = 'None';
+    otherwise
+        displayValue = rawValue;
 end
 end
 

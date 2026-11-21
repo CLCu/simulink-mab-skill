@@ -470,7 +470,7 @@ def build_plan(spec: dict, blocks: list[dict], edges: list[dict],
         **placement,
         "unverified_in_plan": [
             "jm_0002 requires visual recognizability; no numeric target-standard threshold",
-            "Line-crossing style must be read from the actual model, not this plan",
+            "Line-crossing style must be read from the actual Simulink environment, not this plan",
             "Final routing, bends and crossings must be re-exported after model_edit",
             "Manual readability rules still require the audit evidence matrix",
         ],
