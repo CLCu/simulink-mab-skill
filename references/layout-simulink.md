@@ -13,6 +13,10 @@
 - `layout-profile.json` 只提供项目决定值，不证明环境已采用。R2025b 用 `get_param(0,'EditorPathXStyle')` 读取全局编辑器偏好；只有读取成功且值为 `hop` 才表示 `Line Hop`。读取失败或值无法识别时，相关交叉保持 `UNVERIFIABLE`。
 - 同一逻辑输出端点的多个消费者共享物理源端口；这是 `db_0032` 分支证据的一部分，不得生成 `S/1`、`S/2` 之类伪端口。
 - `layout_lint.py` 从每条线的 `Points` 计算方向变化次数和折线坐标长度。折弯数是确定性诊断量；“无必要”仍需结合信号语义和最终图面判断。目标规范没有线长数值上限，线长不能单独作为通过或违规依据。
+- `layout_lint.py` 的 `appearance_quality` 是项目视觉门禁，独立于规则 `COMPLIANT` 状态。它分别统计 `crossing_events`、`crossing_pairs`、`overlap_events`、`through_block_events` 和 `diagonal_segments`。
+- 全模型检查使用 `export_all_geometry.m` 的 manifest。各 scope 在自身局部坐标中独立计算，只汇总长度、折点和事件数，不把不同层级的坐标混在一起。Chart/Stateflow 转移线由 Stateflow 几何链单独检查。
+- `Line Hop` 不减少交叉事件数。即使 `db_0032-a2=COMPLIANT`，只要 `crossing_events>0`，项目外观结论仍为 `FAIL`（仅极小残留豁免全部条件满足并获准时例外，见交叉整改策略）。
+- 块可辨识性、信号标签和“无必要折弯”保留为 `MANUAL`；linter 返回 `0` 只表示可以进入当前 PNG 签核，不等于这些项已关闭。
 
 ## na_0004 — Simulink model appearance settings
 
@@ -99,27 +103,70 @@
 - d：单个分支点不得分出超过两条支线（JMAAB）。
 - e：信号线应按布局需要水平或垂直拉伸。
 
-**动作** 采用正交走线、分层左→右、分支树、Goto/From 或明确子系统接口。Mux 只组合不同信号，不能把同一标量复制到多个目标。
+**动作** 采用正交走线、分层左→右、功能分区、专用布线走廊、分支树或明确子系统接口。`Goto/From` 仅可按下方受限策略在几何手段穷尽后裁决使用。Mux 只组合不同信号，不能把同一标量复制到多个目标。先修全模型 `repair_order` 中最靠前的 scope，再修其 `top_crossing_groups` 中事件最多的端点组。
 
-**验证** 由单层几何检查 a1、b、c、d、e。a2 从 R2025b 根对象读取 `EditorPathXStyle`：`hop` 为 `Line Hop`，`grad_pin` 为 `Tunnel`，`none` 为 `None`；读取失败或值无法识别时保持 `UNVERIFIABLE`。
+**验证** 由单层几何检查 a1、b、c、d、e。a2 从 R2025b 根对象读取 `EditorPathXStyle`：`hop` 为 `Line Hop`，`grad_pin` 为 `Tunnel`，`none` 为 `None`；读取失败或值无法识别时保持 `UNVERIFIABLE`。随后必须单独读取 `appearance_quality`，不能把 a1/a2 的 `COMPLIANT` 当作零交叉。
 
-### 交叉路由策略（项目策略，不属于 MAAB v5 独立规则）
+### 交叉整改与受限 Goto/From 策略（项目策略）
 
-本策略服务于 `db_0032-a1/a2`，不新增规则 ID，也不把 `Goto/From` 变成所有交叉问题的强制替代方案。
+本策略服务于 `db_0032-a1/a2`，不新增规则 ID。整改阶梯如下，前一级穷尽后才允许进入下一级：
 
-1. 先调整 Inport/Outport 的纵向位置、块顺序和分支树，或重新正交走线。`db_0042-a/b` 允许移动输入/输出块以避免交叉。
-2. 交叉仍存在时，可按参与交叉数、折线长度和折弯数排序，逐条评估将候选线改为 `Goto/From`。不要固定为“最多改两条”；每次只改一条并重新导出、lint 和检查 PNG。
-3. 只有交叉减少且整体可读性有净收益时才转换下一条。若 `Goto/From` 增加追踪困难、标签复杂度或没有净收益，应停止该策略。
-4. 无法消除的剩余交叉才使用全局 `Line Hop`，并按 a2 复核实际设置和最终图面。
+1. 几何分区与端口对齐：按功能划分列和区域，调整 Inport/Outport 的纵向位置（Inport 移到消费者高度、Outport 移到生产者高度以缩短线长）、端口对齐、块顺序和分支树，或重新正交走线。`db_0042-a/b` 允许移动输入/输出块以避免交叉。
+2. 走廊重排：为前向长线、反馈线和局部扇出分配互不穿越的布线走廊；同一区域的多条线应有清晰的横向/纵向顺序。
+3. 按全模型 `hotspots`、scope 内 `top_crossing_groups`、参与交叉数、折弯数和长度排序，每次只改一组相关路径，再重新导出受影响 scope、运行全模型 manifest lint、渲染和检查当前 PNG。只有首要质量指标下降且整体可读性有净收益时才继续。比较顺序为 `crossing_events`、`overlap_events`、`through_block_events`、`diagonal_segments`、`goto_from_blocks`、`total_bends`、`total_length`；前一指标未改善时，不接受仅让后一指标变差的修改。
+4. 受限 Goto/From 裁决转换：连续 3 轮几何整改无净改善后，才可按 `goto_conversion_candidates`（已排除 Inport 源线和 Goto/From 端点线，按交叉数/线长排序）逐簇裁决：先转换 1 条，复测仍停滞再转换第 2 条，逐步递进。每对必须满足下述预算与护栏，并写入证据文件。
+5. 极小残留豁免：预算耗尽且几何手段穷尽后，残留交叉 ≤2 处且涉及 ≤2 条线、实际 crossing style 为 hop、有书面裁决（`geometry_exhausted=true` + `residual_waiver.claimed=true` + reason）时，门禁条件放行（PASS + MANUAL），必须逐张 PNG 复核并在交付报告列出残留线对。大面积 Line Hop 禁止；不满足任一条件仍为 FAIL。
 
-转换为 `Goto/From` 时必须保持原信号拓扑和消费者集合，并满足相关规则：
+**Goto/From 预算与护栏**（`goto_from_policy`，fail-closed 校验）：
 
-- Goto 的 tag visibility 须为 `Local`（`na_0011-a`），对应 From 与 Goto 位于同一层级。
-- Goto tag、From tag、信号名及相关端口/元素名按 `jc_0602-a` 保持一致；连接到 Goto 的线按 `na_0008-b` 显示必要标签。
-- 不得把两个 structural subsystem 之间唯一要求的直接信号连接替换成 `Goto/From`，否则可能与 `jc_0171-a` 冲突。
-- 不得改变信号语义、执行依赖或分叉关系；转换后必须重新运行几何检查和最终渲染。
+- 预算按 scope 功能块数 N（不含 Goto/From 与 annotation）：N≤20→1 对；N≤60→2 对；N>60→3 对；硬上限 3 对。超预算即 FAIL。
+- 每个新增 tag 必须绑定 `maab.goto_justification/v1` 证据文件（`--goto-justification`），含 `reason` 与 `eliminated_crossings`（被消除的交叉线对）；缺证据即 FAIL。已有模型 baseline 中已存在的 tag 免证据，新增 tag 不豁免。
+- Goto 紧贴源块、From 紧贴消费者块；`TagVisibility=local`；tag 使用信号名；每 tag 的 From ≤2（防止用 Goto+多 From 隐藏扇出绕过 `db_0032-d`）。
+- 禁止 Inport 直连 Goto（项目硬约束，比目标规范更严）；禁止 From→Goto 链式连接；禁止未配对的 Goto 或 From。候选转换自动排除 Inport 源线。
+- 不得因为视觉评分需要而批量新增该块；Goto/From 对数仍列入 `acceptance_order` 比较。
+- From 贴靠消费者时若其块名与消费者块名在图面重叠，可隐藏 From 的冗余块名（`ShowName=off`）；块内 tag 必须保持可见且与信号名一致。凡显示出的块名仍须位于块下方（db_0142）。窄缝贴靠（端口左侧仅剩窄走廊时）允许缩小 From 尺寸，但桩线仍须正交且不得穿块/新增交叉。
 
-MAAB v5 允许 `Inport → Goto` 直接连接，不得把这种连接本身判为违规。若项目另有禁止要求，应作为项目自定义约束明确登记，不能归因于 MAAB v5。
+证据文件格式（每 scope 一个 entry）：
+
+```json
+{
+  "schema_version": "maab.goto_justification/v1",
+  "model": "Model",
+  "scopes": [
+    {
+      "scope": "Model/Sub",
+      "geometry_exhausted": true,
+      "pairs": [
+        {
+          "tag": "Sig",
+          "goto": "Model/Sub/G1",
+          "froms": ["Model/Sub/F1"],
+          "eliminated_crossings": [{"line_a": "line_1", "line_b": "line_2"}],
+          "reason": "几何手段穷尽后消除的交叉说明"
+        }
+      ],
+      "residual_waiver": {"claimed": true, "reason": "残留交叉说明"}
+    }
+  ]
+}
+```
+
+交叉计数是动作触发器，不是最终交付项。检测到 `crossing_events>0` 后必须进入上述整改循环；无论本轮是否降低数量，都不得把仅有报告、无限重排、超预算 Goto/From 或大面积 hop 写成外观通过。
+
+项目 profile 的 `appearance_quality.absolute_limits` 要求以下计数均为 0：
+
+- `crossing_events`：不同信号线的实际水平/垂直交点数量。
+- `overlap_events`：不同信号线共线重叠数量。
+- `through_block_events`：信号线穿过非端点半块的数量。
+- `diagonal_segments`：非正交线段数量。
+
+`goto_from_blocks` 不再是硬零指标，由 `goto_from_policy` 的预算、配对、可见性与证据门禁管辖，仍保留在 `acceptance_order` 中作比较量。
+
+`layout_lint.py` 对项目策略执行 fail-closed 校验：四个 `absolute_limits` 和四个 `max_delta` 必须写为 0，`goto_from_policy` 各字段必须与本文一致，`line_hop.counts_as_crossing=true`、`line_hop.allowed_as_appearance_pass=false`、`residual_waiver` 上限为 2 处/2 线，并保留当前 PNG 复核。缺失、格式错误或试图放宽硬约束的 profile 返回 `INVALID`。
+
+已有模型修改前先导出 baseline。修改后除了满足绝对上限，还必须满足 `existing_scope.max_delta`：四个硬指标相对 baseline 不得增加。baseline 中已存在的 tag 可原样保留且免证据；新增 tag 必须有裁决证据。
+
+目标建模规范 v5 允许 `Inport → Goto` 直接连接，也不要求删除模型中原有的 `Goto/From`。本项目更严：布局整改中禁止 Inport 直连 Goto，Goto 必须接在功能块输出之后。若用户明确要求改变既有 Goto/From 功能架构，该操作应作为独立需求处理，不得纳入本 Skill 的外观通过路径。
 
 ## db_0141 — Signal flow in Simulink models
 

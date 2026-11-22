@@ -56,7 +56,15 @@ for k = 1:numel(stateObjects)
     item.id = objectId('state', obj);
     item.name = cleanText(obj.Name);
     item.label = textValue(obj, 'LabelString');
-    item.position = readNumeric(obj, 'Position');
+    % Stateflow reports [x, y, width, height]; the lint schema expects
+    % corner points [x0, y0, x1, y1]. Convert explicitly.
+    rawPos = readNumeric(obj, 'Position');
+    if numel(rawPos) == 4
+        item.position = [rawPos(1), rawPos(2), ...
+            rawPos(1) + rawPos(3), rawPos(2) + rawPos(4)];
+    else
+        item.position = rawPos;
+    end
     item.decomposition = cleanText(obj.Decomposition);
     item.type = cleanText(obj.Type);
     item.entry_action = textValue(obj, 'EntryAction');

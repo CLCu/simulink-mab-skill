@@ -415,8 +415,9 @@ def _layout(blocks: list[dict], edges: list[dict], profile: dict[str, Any]) -> d
                 "source": {"block": source, "port": port},
                 "consumer_count": len(group),
                 "required_action": (
-                    "Restructure into a branch tree, Goto/From, or an explicit "
-                    "interface; Mux does not duplicate a scalar."
+                    "Restructure into a branch tree or an explicit subsystem "
+                    "interface; Goto/From only within the project budget with "
+                    "crossing justification, and Mux does not duplicate a scalar."
                 ),
             })
 
