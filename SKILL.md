@@ -1,12 +1,11 @@
 ---
 name: mab-modeling-guidelines
-description: 在 MATLAB R2025b 中搭建、修改或新建 Simulink/Stateflow 模型时，把图面布局做干净：零交叉、零共线重叠、零穿块、零斜线的外观度量 + 渲染 PNG 逐张目视复核的闭环。适用于用户要求“布局规范”“外观好看”“看起来符合建模规范”或提出“搭建模型/搭建Simulink模型”的建模任务；不做规则合规审计、功能验证或已有模型的独立复查。
+description: 在 MATLAB R2025b 中搭建、修改或新建 Simulink/Stateflow 模型时，把图面布局做干净：零交叉、零共线重叠、零穿块、零斜线的外观度量 + 渲染 PNG 逐张目视复核的闭环。适用于用户要求“布局规范”、“外观好看”、“符合建模规范”、“搭建模型、搭建Simulink模型”的建模任务；不做规则合规审计、功能验证或已有模型的独立复查。
 metadata:
   author: luchao
   date: "2026-11-22"
   version: "2.0.0"
 ---
-
 # Simulink / Stateflow 外观布局
 
 ## 触发与边界
@@ -18,16 +17,16 @@ metadata:
 
 ## 工作路径
 
-| 步骤 | 工具 | 要点 |
-| --- | --- | --- |
-| 1 规格与预规划 | `scripts/layout_plan.py` | spec.json → plan JSON（只输出数据，不建模型） |
-| 2 建结构 | SATK `building-simulink-models` + `model_edit` | 先过库/块策略门槛；`ref`/`#ref` 仅同调用内有效 |
-| 3 布局 | SATK `arranging-simulink-layouts` + `model_edit` | 新建可 full；已有模型默认增量，整图重排须用户同意 |
-| 4 度量 | `export_all_geometry.m` + `layout_metrics.py --manifest` | 已有模型修改前先导出 baseline manifest |
-| 5 目视 | `render_check.m` → 逐张看 PNG | 初版布局后看一次；每次修复后重渲染再看 |
-| 6 修复循环 | `repair_suggest.py` 生成 ops → SATK 应用一条 → 重导出+度量裁判；辅以 [layout-craft.md](references/layout-craft.md) | 每轮只改一组；连续 3 轮无净改善即停止并报告 |
-| 7 Stateflow（如有） | `export_stateflow_geometry.m` + `chart_metrics.py`（仅参考）+ Chart PNG | Chart 内部用 `model_edit` 的 Stateflow scope 编辑 |
-| 8 交付 | 最终全模型度量 + 最终 PNG 逐张复核 | 见完成标准 |
+| 步骤                | 工具                                                                                                                  | 要点                                                |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| 1 规格与预规划      | `scripts/layout_plan.py`                                                                                            | spec.json → plan JSON（只输出数据，不建模型）      |
+| 2 建结构            | SATK `building-simulink-models` + `model_edit`                                                                    | 先过库/块策略门槛；`ref`/`#ref` 仅同调用内有效  |
+| 3 布局              | SATK `arranging-simulink-layouts` + `model_edit`                                                                  | 新建可 full；已有模型默认增量，整图重排须用户同意   |
+| 4 度量              | `export_all_geometry.m` + `layout_metrics.py --manifest`                                                          | 已有模型修改前先导出 baseline manifest              |
+| 5 目视              | `render_check.m` → 逐张看 PNG                                                                                      | 初版布局后看一次；每次修复后重渲染再看              |
+| 6 修复循环          | `repair_suggest.py` 生成 ops → SATK 应用一条 → 重导出+度量裁判；辅以 [layout-craft.md](references/layout-craft.md) | 每轮只改一组；连续 3 轮无净改善即停止并报告         |
+| 7 Stateflow（如有） | `export_stateflow_geometry.m` + `chart_metrics.py`（仅参考）+ Chart PNG                                           | Chart 内部用 `model_edit` 的 Stateflow scope 编辑 |
+| 8 交付              | 最终全模型度量 + 最终 PNG 逐张复核                                                                                    | 见完成标准                                          |
 
 ## 不可违反的约束
 
