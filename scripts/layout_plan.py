@@ -1,10 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Create a Simulink layout plan; never create or modify a MATLAB model.
+"""Suggest a clean Simulink layout as JSON data for SATK model_edit.
 
-The output is data for the agent to map to SATK ``model_edit`` operations.
-It is not a model-build script.  Structure and final placement remain owned by
-``model_edit`` / ``arranging-simulink-layouts``.
+Never creates or modifies a model. Placement = rank columns left-to-right,
+parallel rows top-to-bottom, ports ordered by neighbour height. Routing =
+straight / single corridor for adjacent columns, a shared branch tree for
+same-column fanout, and one dedicated lane per feedback or multi-column edge.
+
+By construction the suggestion has no diagonals, no cross-net collinear
+overlap and no through-block segment; residual crossings are left to the
+metrics + PNG repair loop. A self-check at the end verifies those guarantees.
 """
 from __future__ import annotations
 
@@ -15,36 +20,22 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "maab.simulink_layout_plan/v1"
-STANDARD = "TARGET_MODELING_GUIDELINE_V5"
-PROFILES = ["NA-MAAB", "JMAAB"]
-MATLAB_VERSION = "R2025b"
+from layout_metrics import hits_interior, is_h, is_v, overlap, rect, segments
+
+SCHEMA_VERSION = "maab.simulink_layout_plan/v2"
 
 DEFAULT_PORTS = {
-    "Inport": (0, 1),
-    "Outport": (1, 0),
-    "Constant": (0, 1),
-    "Gain": (1, 1),
-    "Sum": (2, 1),
-    "Product": (2, 1),
-    "Divide": (2, 1),
-    "Saturation": (1, 1),
-    "UnitDelay": (1, 1),
-    "Delay": (1, 1),
-    "Integrator": (1, 1),
-    "Switch": (3, 1),
-    "Mux": (2, 1),
-    "Demux": (1, 2),
-    "RelationalOperator": (2, 1),
-    "LogicalOperator": (2, 1),
-    "BusCreator": (2, 1),
-    "BusSelector": (1, 1),
+    "Inport": (0, 1), "Outport": (1, 0), "Constant": (0, 1), "Gain": (1, 1),
+    "Sum": (2, 1), "Product": (2, 1), "Divide": (2, 1), "Saturation": (1, 1),
+    "UnitDelay": (1, 1), "Delay": (1, 1), "Integrator": (1, 1), "Switch": (3, 1),
+    "Mux": (2, 1), "Demux": (1, 2), "RelationalOperator": (2, 1),
+    "LogicalOperator": (2, 1), "BusCreator": (2, 1), "BusSelector": (1, 1),
     "SubSystem": (1, 1),
 }
 
 
 class PlanError(ValueError):
-    """Invalid or incomplete input."""
+    pass
 
 
 def _scalar(value: Any, default: float) -> float:
@@ -57,482 +48,386 @@ def _scalar(value: Any, default: float) -> float:
 
 
 def _snap(value: float, grid: float) -> int:
-    if grid <= 0:
-        return int(round(value))
-    return int(round(value / grid) * grid)
+    return int(round(value / grid) * grid) if grid > 0 else int(round(value))
 
 
-def _port_counts(block: dict[str, Any]) -> tuple[int, int]:
+def _ports(block: dict) -> tuple[int, int]:
     declared = block.get("ports")
-    default_in, default_out = DEFAULT_PORTS.get(block.get("type", "Gain"), (1, 1))
+    din, dout = DEFAULT_PORTS.get(block.get("type", "Gain"), (1, 1))
     if isinstance(declared, int):
         return declared, 1
-    if isinstance(declared, (list, tuple)):
-        if len(declared) >= 2:
-            return int(declared[0]), int(declared[1])
+    if isinstance(declared, (list, tuple)) and len(declared) >= 2:
+        return int(declared[0]), int(declared[1])
     if isinstance(declared, dict):
-        inputs = declared.get("in", declared.get("inputs", default_in))
-        outputs = declared.get("out", declared.get("outputs", default_out))
-        return int(inputs), int(outputs)
-    return default_in, default_out
+        return int(declared.get("in", declared.get("inputs", din))), \
+            int(declared.get("out", declared.get("outputs", dout)))
+    return din, dout
 
 
-def _edge_record(raw: Any, index: int) -> dict[str, Any]:
-    if isinstance(raw, (list, tuple)):
-        if len(raw) < 2:
-            raise PlanError(f"edge[{index}] must contain source and destination")
-        record = {"source": raw[0], "destination": raw[1]}
-        if len(raw) >= 3:
-            record["source_port"] = raw[2]
-        if len(raw) >= 4:
-            record["destination_port"] = raw[3]
-    elif isinstance(raw, dict):
-        record = dict(raw)
-        record["source"] = (
-            record.get("source")
-            or record.get("src")
-            or record.get("source_block")
-        )
-        record["destination"] = (
-            record.get("destination")
-            or record.get("dst")
-            or record.get("destination_block")
-        )
-    else:
-        raise PlanError(f"edge[{index}] must be an array or object")
-    if not record.get("source") or not record.get("destination"):
-        raise PlanError(f"edge[{index}] has an empty endpoint")
-    record["id"] = str(record.get("id") or f"edge_{index + 1}")
-    return record
-
-
-def validate_and_normalize(spec: Any) -> tuple[dict[str, Any], list[dict], list[dict]]:
-    if not isinstance(spec, dict):
-        raise PlanError("spec must be a JSON object")
-    if not str(spec.get("model") or "").strip():
+def normalize(spec: Any) -> tuple[dict, list[dict], list[dict]]:
+    if not isinstance(spec, dict) or not str(spec.get("model") or "").strip():
         raise PlanError("spec.model is required")
     blocks = spec.get("blocks")
     edges_raw = spec.get("edges")
     if not isinstance(blocks, list) or not blocks:
         raise PlanError("spec.blocks must be a non-empty array")
     if not isinstance(edges_raw, list):
-        raise PlanError("spec.edges must be an array; use [] for no connections")
-    normalized_blocks = []
-    ids = set()
-    for index, block in enumerate(blocks):
-        if not isinstance(block, dict):
-            raise PlanError(f"blocks[{index}] must be an object")
-        block_id = str(block.get("id") or "").strip()
-        if not block_id:
-            raise PlanError(f"blocks[{index}].id is required")
-        if block_id in ids:
-            raise PlanError(f"duplicate logical block id: {block_id}")
-        ids.add(block_id)
-        normalized = dict(block)
-        normalized["id"] = block_id
-        normalized["type"] = str(block.get("type") or "Gain")
-        normalized["name"] = str(block.get("name") or block_id)
-        normalized["_ports_in"], normalized["_ports_out"] = _port_counts(block)
-        if normalized["_ports_in"] < 0 or normalized["_ports_out"] < 0:
-            raise PlanError(f"block {block_id} has a negative port count")
-        normalized_blocks.append(normalized)
-    edges = [_edge_record(raw, i) for i, raw in enumerate(edges_raw)]
-    seen_ids = set()
-    for edge in edges:
-        if edge["id"] in seen_ids:
-            raise PlanError(f"duplicate edge id: {edge['id']}")
-        seen_ids.add(edge["id"])
-        if edge["source"] not in ids or edge["destination"] not in ids:
-            raise PlanError(
-                f"edge {edge['id']} refers to an unknown block: "
-                f"{edge['source']} -> {edge['destination']}"
-            )
-    return spec, normalized_blocks, edges
+        raise PlanError("spec.edges must be an array (use [] for no connections)")
+    ids, normalized = set(), []
+    for i, b in enumerate(blocks):
+        if not isinstance(b, dict) or not str(b.get("id") or "").strip():
+            raise PlanError(f"blocks[{i}].id is required")
+        bid = str(b["id"]).strip()
+        if bid in ids:
+            raise PlanError(f"duplicate block id {bid}")
+        ids.add(bid)
+        n = dict(b)
+        n["id"], n["type"] = bid, str(b.get("type") or "Gain")
+        n["name"] = str(b.get("name") or bid)
+        n["_in"], n["_out"] = _ports(b)
+        if n["_in"] < 0 or n["_out"] < 0:
+            raise PlanError(f"block {bid} has negative port count")
+        normalized.append(n)
+    edges = []
+    for i, raw in enumerate(edges_raw):
+        if isinstance(raw, (list, tuple)):
+            if len(raw) < 2:
+                raise PlanError(f"edge[{i}] needs source and destination")
+            e = {"source": raw[0], "destination": raw[1]}
+            if len(raw) >= 3:
+                e["source_port"] = raw[2]
+            if len(raw) >= 4:
+                e["destination_port"] = raw[3]
+        elif isinstance(raw, dict):
+            e = dict(raw)
+            e["source"] = e.get("source") or e.get("src")
+            e["destination"] = e.get("destination") or e.get("dst")
+        else:
+            raise PlanError(f"edge[{i}] must be array or object")
+        if not e.get("source") or not e.get("destination"):
+            raise PlanError(f"edge[{i}] has empty endpoint")
+        if e["source"] not in ids or e["destination"] not in ids:
+            raise PlanError(f"edge[{i}] references unknown block")
+        e["id"] = str(e.get("id") or f"edge_{i + 1}")
+        edges.append(e)
+    if len({e["id"] for e in edges}) != len(edges):
+        raise PlanError("duplicate edge id")
+    return spec, normalized, edges
 
 
-def find_back_edges(nodes: list[str], edges: list[dict]) -> tuple[set[str], list[str]]:
-    """Return edge IDs that close DFS cycles and a topological order."""
-    adjacency: dict[str, list[dict]] = defaultdict(list)
-    for edge in edges:
-        adjacency[edge["source"]].append(edge)
-    state: dict[str, int] = {}
-    back: set[str] = set()
-    order: list[str] = []
+def back_edges_and_order(nodes: list[str], edges: list[dict]) -> tuple[set[str], list[str]]:
+    adj = defaultdict(list)
+    for e in edges:
+        adj[e["source"]].append(e)
+    state, back, order = {}, set(), []
     sys.setrecursionlimit(max(10000, len(nodes) * 4))
 
     def visit(node: str) -> None:
         state[node] = 1
-        for edge in adjacency[node]:
-            target = edge["destination"]
-            status = state.get(target, 0)
-            if status == 0:
-                visit(target)
-            elif status == 1:
-                back.add(edge["id"])
+        for e in adj[node]:
+            s = state.get(e["destination"], 0)
+            if s == 0:
+                visit(e["destination"])
+            elif s == 1:
+                back.add(e["id"])
         state[node] = 2
         order.append(node)
 
-    for node in nodes:
-        if state.get(node, 0) == 0:
-            visit(node)
+    for n in nodes:
+        if state.get(n, 0) == 0:
+            visit(n)
     return back, list(reversed(order))
 
 
-def circular_node_edges(edges: list[dict]) -> set[str]:
-    """Edges lying in a directed cycle (used only to classify feedback)."""
-    adjacency: dict[str, list[int]] = defaultdict(list)
-    for index, edge in enumerate(edges):
-        adjacency[edge["source"]].append(index)
-    cycle_edges: set[str] = set()
-    for index, edge in enumerate(edges):
-        target = edge["destination"]
-        stack = [target]
-        visited = set()
-        found = False
-        while stack and not found:
-            node = stack.pop()
-            if node == edge["source"]:
-                found = True
+def cycle_members(edges: list[dict]) -> set[str]:
+    adj = defaultdict(list)
+    for e in edges:
+        adj[e["source"]].append(e["destination"])
+    members = set()
+    for e in edges:
+        stack, seen = [e["destination"]], set()
+        while stack:
+            n = stack.pop()
+            if n == e["source"]:
+                members.add(e["id"])
                 break
-            if node in visited:
-                continue
-            visited.add(node)
-            stack.extend(edges[n]["destination"] for n in adjacency[node])
-        if found:
-            cycle_edges.add(edge["id"])
-    return cycle_edges
+            if n not in seen:
+                seen.add(n)
+                stack.extend(adj[n])
+    return members
 
 
-def _block_size(block: dict[str, Any], profile: dict[str, Any]) -> tuple[int, int]:
-    explicit = block.get("size")
-    if isinstance(explicit, (list, tuple)) and len(explicit) >= 2:
-        return int(explicit[0]), int(explicit[1])
-    if block.get("type") in ("Inport", "Outport"):
-        port = profile.get("port_block", {})
-        return (
-            int(_scalar(port.get("preferred_width"), 30)),
-            int(_scalar(port.get("preferred_height"), 14)),
-        )
-    block_profile = profile.get("block", {})
-    return (
-        int(_scalar(block_profile.get("preferred_width"), 40)),
-        int(_scalar(block_profile.get("preferred_height"), 40)),
-    )
-
-
-def _layout(blocks: list[dict], edges: list[dict], profile: dict[str, Any]) -> dict[str, Any]:
-    by_id = {block["id"]: block for block in blocks}
-    nodes = list(by_id)
-    back, topo = find_back_edges(nodes, edges)
-    cycle_edges = circular_node_edges(edges)
-    forward_edges = [edge for edge in edges if edge["id"] not in back]
-    incoming: dict[str, list[dict]] = defaultdict(list)
-    for edge in forward_edges:
-        incoming[edge["destination"]].append(edge)
-
-    rank = {node: 0 for node in topo}
-    for node in topo:
-        for edge in incoming[node]:
-            rank[node] = max(rank[node], rank[edge["source"]] + 1)
+def build_plan(spec: dict, blocks: list[dict], edges: list[dict], profile: dict) -> dict:
+    by_id = {b["id"]: b for b in blocks}
+    back, topo = back_edges_and_order(list(by_id), edges)
+    cycles = cycle_members(edges)
+    forward = [e for e in edges if e["id"] not in back]
+    incoming = defaultdict(list)
+    for e in forward:
+        incoming[e["destination"]].append(e)
+    rank = {n: 0 for n in topo}
+    for n in topo:
+        for e in incoming[n]:
+            rank[n] = max(rank[n], rank[e["source"]] + 1)
+    # Only backward cycle edges are feedback; forward edges inside a cycle
+    # still flow left-to-right and route directly.
+    feedback = {e["id"] for e in edges if e["id"] in cycles and rank[e["destination"]] <= rank[e["source"]]}
 
     grid = _scalar(profile.get("grid"), 10)
-    spacing = profile.get("spacing", {})
-    hgap = _scalar(spacing.get("horizontal"), 60)
-    vgap = _scalar(spacing.get("vertical"), 40)
-    margin = _scalar(profile.get("layout", {}).get("margin"), 40)
-    sizes = {block["id"]: _block_size(block, profile) for block in blocks}
-
-    columns: dict[int, list[str]] = defaultdict(list)
-    for node in nodes:
-        columns[rank[node]].append(node)
-    column_count = max(columns) + 1 if columns else 0
-    column_x = []
-    cursor_x = margin
-    for column in range(column_count):
-        column_x.append(cursor_x)
-        width = max(sizes[node][0] for node in columns[column])
-        cursor_x += width + hgap
-
-    centers_y: dict[str, float] = {}
-    positions: dict[str, list[int]] = {}
-    for column in range(column_count):
-        column_nodes = columns[column]
-
-        def preferred_center(node: str) -> float:
-            predecessors = [
-                centers_y[item["source"]]
-                for item in forward_edges
-                if item["destination"] == node and item["source"] in centers_y
-            ]
-            return sum(predecessors) / len(predecessors) if predecessors else margin
-
-        column_nodes.sort(key=lambda node: (preferred_center(node), node))
-        cursor_y = margin
-        for node in column_nodes:
-            width, height = sizes[node]
-            center = preferred_center(node)
-            y0 = max(_snap(center - height / 2, grid), cursor_y)
-            x0 = _snap(column_x[column], grid)
-            positions[node] = [x0, y0, x0 + width, y0 + height]
-            centers_y[node] = y0 + height / 2
-            cursor_y = y0 + height + vgap
-
-    outgoing: dict[tuple[str, int], list[dict]] = defaultdict(list)
-    destination_groups: dict[str, list[dict]] = defaultdict(list)
-    for edge in edges:
-        source_block = by_id[edge["source"]]
-        outputs = source_block.get("_ports_out", 0)
-        raw_port = edge.get("source_port")
-        if raw_port is None:
-            port = 1
+    sp = profile.get("spacing") or {}
+    hgap, vgap = _scalar(sp.get("horizontal"), 60), _scalar(sp.get("vertical"), 40)
+    margin, lane_gap = _scalar(sp.get("margin"), 40), _scalar(sp.get("lane_gap"), 20)
+    blk = profile.get("block") or {}
+    sizes = {}
+    for b in blocks:
+        if isinstance(b.get("size"), (list, tuple)) and len(b["size"]) >= 2:
+            sizes[b["id"]] = (int(b["size"][0]), int(b["size"][1]))
+        elif b["type"] in ("Inport", "Outport"):
+            sizes[b["id"]] = (int(_scalar(blk.get("port_width"), 30)), int(_scalar(blk.get("port_height"), 14)))
         else:
-            port = int(raw_port)
-        if outputs < 1 or port < 1 or port > outputs:
-            raise PlanError(
-                f"edge {edge['id']} source port {port} is invalid for "
-                f"{edge['source']} (outputs={outputs})"
-            )
-        edge["_source_port"] = port
-        outgoing[(edge["source"], port)].append(edge)
-        destination_groups[edge["destination"]].append(edge)
+            sizes[b["id"]] = (int(_scalar(blk.get("width"), 40)), int(_scalar(blk.get("height"), 40)))
 
-    for block in blocks:
-        group = destination_groups.get(block["id"], [])
-        inputs = block.get("_ports_in", 0)
-        explicit = {}
-        for edge in group:
-            raw = edge.get("destination_port")
-            if raw is not None:
-                explicit[edge["id"]] = int(raw)
-        if explicit and len(set(explicit.values())) != len(explicit):
-            raise PlanError(f"multiple edges reuse one input port on {block['id']}")
-        if len(group) > inputs:
-            raise PlanError(
-                f"block {block['id']} declares {inputs} inputs but receives {len(group)} edges"
-            )
-        remaining = [
-            port for port in range(1, inputs + 1) if port not in set(explicit.values())
-        ]
-        ordered = sorted(
-            (edge for edge in group if edge["id"] not in explicit),
-            key=lambda edge: (centers_y[edge["source"]], edge["id"]),
-        )
-        for edge, port in zip(ordered, remaining):
-            edge["_destination_port"] = port
-        for edge in group:
-            edge["_destination_port"] = int(
-                explicit.get(edge["id"], edge.get("_destination_port", 0))
-            )
-            if not 1 <= edge["_destination_port"] <= inputs:
-                raise PlanError(f"edge {edge['id']} destination port is invalid")
+    columns = defaultdict(list)
+    for n in by_id:
+        columns[rank[n]].append(n)
+    col_count = max(columns) + 1 if columns else 0
+    col_x, cursor = [], margin
+    for c in range(col_count):
+        col_x.append(cursor)
+        cursor += max(sizes[n][0] for n in columns[c]) + hgap
 
-    def port_y(block_id: str, port: int, count: int, output: bool) -> float:
-        x0, y0, x1, y1 = positions[block_id]
-        del x0, x1
+    centers, positions = {}, {}
+    for c in range(col_count):
+        nodes = columns[c]
+
+        def preferred(n: str) -> float:
+            preds = [centers[e["source"]] for e in forward
+                     if e["destination"] == n and e["source"] in centers]
+            return sum(preds) / len(preds) if preds else margin
+
+        # Feedback arrives from the top corridor: keep feedback-consuming
+        # blocks high in the column so approach verticals stay short.
+        fb_dest = {e["destination"] for e in edges if e["id"] in feedback}
+        nodes.sort(key=lambda n: (0 if n in fb_dest else 1, preferred(n), n))
+        cursor_y = margin
+        for n in nodes:
+            w, h = sizes[n]
+            y0 = max(_snap(preferred(n) - h / 2, grid), cursor_y)
+            x0 = _snap(col_x[c], grid)
+            positions[n] = [x0, y0, x0 + w, y0 + h]
+            centers[n] = y0 + h / 2
+            cursor_y = y0 + h + vgap
+
+    # Ports: explicit first, remaining inputs ordered by source height.
+    out_groups = defaultdict(list)
+    in_groups = defaultdict(list)
+    for e in edges:
+        s = by_id[e["source"]]
+        port = int(e.get("source_port") or 1)
+        if not 1 <= port <= s["_out"]:
+            raise PlanError(f"edge {e['id']} source port {port} invalid for {e['source']}")
+        e["_sp"] = port
+        out_groups[(e["source"], port)].append(e)
+        in_groups[e["destination"]].append(e)
+    for b in blocks:
+        group = in_groups.get(b["id"], [])
+        explicit = {e["id"]: int(e["destination_port"]) for e in group if e.get("destination_port") is not None}
+        if len(set(explicit.values())) != len(explicit):
+            raise PlanError(f"multiple edges reuse one input port on {b['id']}")
+        if len(group) > b["_in"]:
+            raise PlanError(f"block {b['id']} declares {b['_in']} inputs but receives {len(group)}")
+        free = [p for p in range(1, b["_in"] + 1) if p not in set(explicit.values())]
+        # Feedback arrives from the top corridor, so feedback-entering edges
+        # take the upper ports; forward edges fill the rest by source height.
+        ordered = sorted((e for e in group if e["id"] not in explicit),
+                         key=lambda e: (0 if e["id"] in feedback else 1,
+                                        centers[e["source"]], e["id"]))
+        for e, p in zip(ordered, free):
+            e["_dp"] = p
+        for e in group:
+            e["_dp"] = explicit.get(e["id"], e.get("_dp", 0))
+            if not 1 <= e["_dp"] <= b["_in"]:
+                raise PlanError(f"edge {e['id']} destination port invalid")
+
+    def port_y(n: str, port: int, count: int) -> float:
+        x0, y0, x1, y1 = positions[n]
         return y0 + (y1 - y0) * port / (count + 1)
 
-    top = max(_snap(min(rect[1] for rect in positions.values()) - vgap, grid), 10)
-    corridor_edges = [
-        edge for edge in edges if abs(port_y(edge["source"], edge["_source_port"],
-                                            by_id[edge["source"]]["_ports_out"], True)
-                                     - port_y(edge["destination"],
-                                              edge["_destination_port"],
-                                              by_id[edge["destination"]]["_ports_in"], False)) >= 1
-    ]
-    slots: dict[int, list[dict]] = defaultdict(list)
-    for edge in corridor_edges:
-        source_column = rank[edge["source"]]
-        slots[source_column].append(edge)
-    corridor_x: dict[str, int] = {}
-    for column, group in slots.items():
-        group.sort(
-            key=lambda edge: (
-                port_y(edge["destination"], edge["_destination_port"],
-                       by_id[edge["destination"]]["_ports_in"], False),
-                edge["id"],
-            )
-        )
-        left = column_x[column] + max(sizes[node][0] for node in columns[column])
-        right = column_x[column + 1] if column + 1 < len(column_x) else left + hgap
-        for index, edge in enumerate(group, start=1):
-            corridor_x[edge["id"]] = _snap(
-                left + (right - left) * index / (len(group) + 1),
-                grid,
-            )
+    def sy(e):
+        return port_y(e["source"], e["_sp"], by_id[e["source"]]["_out"])
+
+    def dy(e):
+        return port_y(e["destination"], e["_dp"], by_id[e["destination"]]["_in"])
+
+    # Gap regions hold every vertical stub; distinct x per request prevents
+    # collinear overlap. Gap -1 is the left margin lane for column-0 approaches.
+    def gap_region(g: int) -> tuple[float, float]:
+        if g < 0:
+            return max(10.0, margin - hgap), col_x[0]
+        left = col_x[g] + max(sizes[n][0] for n in columns[g])
+        right = col_x[g + 1] if g + 1 < col_count else left + hgap
+        return left, right
+
+    # Each gap is split into three zones so verticals of different roles do
+    # not cross the horizontals of another role: exits far left, forward
+    # corridors/spines middle, approaches right (ordered by port height desc
+    # so a taller approach never cuts a shorter one's leaf).
+    requests = defaultdict(list)  # gap -> (zone, sort_key, key)
+    trees = {}
+    for (src, port), group in out_groups.items():
+        same_col = [e for e in group if rank[e["destination"]] == rank[src] + 1]
+        if len(same_col) >= 2:
+            trees[(src, port)] = same_col
+            requests[rank[src]].append((1, min(dy(e) for e in same_col), f"tree:{src}:{port}"))
+    lane_edges = []
+    for e in edges:
+        if e["id"] in feedback or rank[e["destination"]] > rank[e["source"]] + 1:
+            lane_edges.append(e)
+            requests[rank[e["source"]]].append((0, sy(e), f"exit:{e['id']}"))
+            requests[rank[e["destination"]] - 1].append((2, -dy(e), f"approach:{e['id']}"))
+        elif (e["source"], e["_sp"]) not in trees and abs(sy(e) - dy(e)) >= 1:
+            requests[rank[e["source"]]].append((1, dy(e), f"corridor:{e['id']}"))
+    slot_x = {}
+    for g, reqs in requests.items():
+        left, right = gap_region(g)
+        width = right - left
+        for zone in (0, 1, 2):
+            group = sorted(r for r in reqs if r[0] == zone)
+            if zone == 0:
+                for i, (_, _, key) in enumerate(group):
+                    slot_x[key] = round(left + width * 0.08 + i * 4, 3)
+            else:
+                lo, hi = (left + width * 0.3, left + width * 0.55) if zone == 1 \
+                    else (left + width * 0.7, right - 3)
+                for i, (_, _, key) in enumerate(group, start=1):
+                    # Fractional on purpose: grid-snapping narrow gaps can
+                    # collapse two slots onto one x (overlap / endpoint cross).
+                    slot_x[key] = round(lo + (hi - lo) * i / (len(group) + 1), 3)
+
+    top_base = min(p[1] for p in positions.values()) - vgap
+    bottom_base = max(p[3] for p in positions.values()) + vgap
+    fb_sorted = sorted((e for e in lane_edges if e["id"] in feedback), key=lambda e: (sy(e), e["id"]))
+    mc_sorted = sorted((e for e in lane_edges if e["id"] not in feedback), key=lambda e: (sy(e), e["id"]))
+    lane_y = {}
+    for i, e in enumerate(fb_sorted, start=1):
+        lane_y[e["id"]] = _snap(top_base - i * lane_gap, grid)
+    for i, e in enumerate(mc_sorted, start=1):
+        lane_y[e["id"]] = _snap(bottom_base + i * lane_gap, grid)
 
     routed = []
-    for edge in edges:
-        source = edge["source"]
-        destination = edge["destination"]
-        sx = positions[source][2]
-        sy = port_y(source, edge["_source_port"], by_id[source]["_ports_out"], True)
-        dx = positions[destination][0]
-        dy = port_y(
-            destination,
-            edge["_destination_port"],
-            by_id[destination]["_ports_in"],
-            False,
-        )
-        points = [[_snap(sx, grid), _snap(sy, grid)]]
-        if edge["id"] in cycle_edges:
-            approach = _snap(positions[destination][0] - hgap / 3, grid)
-            source_exit = _snap(sx + hgap / 3, grid)
-            points += [
-                [source_exit, _snap(sy, grid)],
-                [source_exit, top],
-                [approach, top],
-                [approach, _snap(dy, grid)],
-            ]
-        elif abs(sy - dy) >= 1:
-            x = corridor_x.get(edge["id"], _snap(sx + hgap / 3, grid))
-            points += [[x, _snap(sy, grid)], [x, _snap(dy, grid)]]
-        points.append([_snap(dx, grid), _snap(dy, grid)])
-        routed.append({
-            "id": edge["id"],
-            "source": {"block": source, "port": edge["_source_port"]},
-            "destination": {
-                "block": destination,
-                "port": edge["_destination_port"],
-            },
-            "suggested_points": points,
-            "feedback": edge["id"] in cycle_edges,
-            "cycle": edge["id"] in cycle_edges,
-        })
+    for e in edges:
+        src, dst = e["source"], e["destination"]
+        sx, dx = positions[src][2], positions[dst][0]
+        # Port endpoints keep fractional heights: snapping them to the grid
+        # can collapse distinct ports of a tall block onto one y and create
+        # collinear overlap between different nets.
+        y_s, y_d = round(sy(e), 3), round(dy(e), 3)
+        tree = trees.get((src, e["_sp"]))
+        if tree and e in tree:
+            spine = slot_x[f"tree:{src}:{e['_sp']}"]
+            points = [[_snap(sx, grid), y_s], [spine, y_s], [spine, y_d], [_snap(dx, grid), y_d]]
+            kind = "branch_tree"
+        elif e["id"] in lane_y:
+            exit_x = slot_x[f"exit:{e['id']}"]
+            approach_x = slot_x[f"approach:{e['id']}"]
+            lane = lane_y[e["id"]]
+            points = [[_snap(sx, grid), y_s], [exit_x, y_s], [exit_x, lane],
+                      [approach_x, lane], [approach_x, y_d], [_snap(dx, grid), y_d]]
+            kind = "feedback_lane" if e["id"] in feedback else "multicolumn_lane"
+        elif abs(y_s - y_d) < 1:
+            points = [[_snap(sx, grid), y_s], [_snap(dx, grid), y_d]]
+            kind = "straight"
+        else:
+            x = slot_x[f"corridor:{e['id']}"]
+            points = [[_snap(sx, grid), y_s], [x, y_s], [x, y_d], [_snap(dx, grid), y_d]]
+            kind = "corridor"
+        routed.append({"id": e["id"], "source": {"block": src, "port": e["_sp"]},
+                       "destination": {"block": dst, "port": e["_dp"]},
+                       "suggested_points": points, "feedback": e["id"] in feedback,
+                       "route_kind": kind})
 
-    branch_points = []
-    jmaab_violations = []
-    for (source, port), group in sorted(outgoing.items()):
-        item = {
-            "source": {"block": source, "port": port},
-            "consumer_count": len(group),
-            "edge_ids": [edge["id"] for edge in group],
-        }
-        branch_points.append(item)
+    # Self-check the construction guarantees on the suggested geometry.
+    findings = []
+    boxes = {b["id"]: rect({"position": positions[b["id"]]}) for b in blocks}
+    for i, a in enumerate(routed):
+        sa = segments(a["suggested_points"])
+        for seg in sa:
+            if not (is_h(seg) or is_v(seg)):
+                findings.append({"kind": "planner_diagonal", "edge": a["id"]})
+            ends = {a["source"]["block"], a["destination"]["block"]}
+            for bid, box in boxes.items():
+                if bid not in ends and hits_interior(seg, box):
+                    findings.append({"kind": "planner_through_block", "edge": a["id"], "block": bid})
+        for b in routed[i + 1:]:
+            net_a = (a["source"]["block"], a["source"]["port"])
+            net_b = (b["source"]["block"], b["source"]["port"])
+            if net_a == net_b:
+                continue
+            for seg_a in sa:
+                for seg_b in segments(b["suggested_points"]):
+                    if overlap(seg_a, seg_b):
+                        findings.append({"kind": "planner_overlap", "edges": [a["id"], b["id"]]})
+    for (src, port), group in sorted(out_groups.items()):
         if len(group) > 2:
-            jmaab_violations.append({
-                "rule": "db_0032-d",
-                "profile": "JMAAB",
-                "source": {"block": source, "port": port},
-                "consumer_count": len(group),
-                "required_action": (
-                    "Restructure into a branch tree or an explicit subsystem "
-                    "interface; Goto/From only within the project budget with "
-                    "crossing justification, and Mux does not duplicate a scalar."
-                ),
-            })
+            findings.append({"kind": "fanout_craft_note", "source": {"block": src, "port": port},
+                             "consumer_count": len(group),
+                             "note": "扇出>2：同列消费者已按分支树走线；跨列消费者走独立走廊。仅为手艺提示，不是门禁。"})
 
-    return {
-        "blocks": [
-            {
-                "id": block["id"],
-                "name": block["name"],
-                "type": block["type"],
-                "ports": {
-                    "in": block["_ports_in"],
-                    "out": block["_ports_out"],
-                },
-                "suggested_position": positions[block["id"]],
-                "rank": rank[block["id"]],
-                "feedback": position_in_cycle(block["id"], edges, cycle_edges),
-                "params": block.get("params", {}),
-            }
-            for block in blocks
-        ],
-        "edges": routed,
-        "branch_points": branch_points,
-        "plan_level_findings": jmaab_violations,
-        "feedback_edges": sorted(cycle_edges),
-        "topological_order": topo,
-    }
-
-
-def position_in_cycle(node: str, edges: list[dict], cycle_edges: set[str]) -> bool:
-    return any(
-        edge["id"] in cycle_edges and node in (edge["source"], edge["destination"])
-        for edge in edges
-    )
-
-
-def build_plan(spec: dict, blocks: list[dict], edges: list[dict],
-               profile: dict[str, Any]) -> dict[str, Any]:
-    placement = _layout(blocks, edges, profile)
     return {
         "schema_version": SCHEMA_VERSION,
-        "standard": STANDARD,
-        "profiles": PROFILES,
-        "matlab_version": MATLAB_VERSION,
         "model": str(spec["model"]),
         "scope": str(spec.get("subsystem") or spec.get("scope") or "").strip("/"),
         "coordinate_frame": "scope-local",
-        "project_profile": {
-            "source": profile.get("source", "unspecified"),
-            "values_are_maab_requirements": False,
-        },
-        **placement,
+        "blocks": [{"id": b["id"], "name": b["name"], "type": b["type"],
+                    "ports": {"in": b["_in"], "out": b["_out"]},
+                    "suggested_position": positions[b["id"]], "rank": rank[b["id"]]} for b in blocks],
+        "edges": routed,
+        "branch_trees": [{"source": {"block": s, "port": p},
+                          "spine_x": slot_x[f"tree:{s}:{p}"],
+                          "edges": [e["id"] for e in g]} for (s, p), g in sorted(trees.items())],
+        "lanes": [{"edge": e["id"], "y": lane_y[e["id"]],
+                   "kind": "feedback" if e["id"] in feedback else "multicolumn"} for e in lane_edges],
+        "plan_level_findings": findings,
+        "feedback_edges": sorted(feedback),
+        "topological_order": topo,
+        "guarantees": "建议几何无斜线、无跨信号共线重叠、无穿块；残留交叉由 layout_metrics + PNG 闭环消除。",
         "unverified_in_plan": [
-            "jm_0002 requires visual recognizability; no numeric target-standard threshold",
-            "Line-crossing style must be read from the actual Simulink environment, not this plan",
-            "Final routing, bends and crossings must be re-exported after model_edit",
-            "Manual readability rules still require the audit evidence matrix",
+            "最终走线以 SATK 布局后的实际模型为准，重新导出度量",
+            "端口端点为 p/(n+1) 近似坐标；实际位置以 Simulink PortHandles（图标几何）为准，由 SATK/修复循环吸附",
+            "可读性（标签/可辨识/多余折弯）以最终 PNG 逐张检查为准",
         ],
         "execution_contract": {
             "structure_operator": "model_edit",
             "layout_operators": ["arranging-simulink-layouts", "model_edit"],
             "plan_is_executable_model_script": False,
-            "forbidden_artifacts": ["_build.m"],
-            "forbidden_apis": [
-                "evaluate_matlab_code model construction",
-                "add_block/add_line through a generated MATLAB script",
-                "set_param Position outside model_edit",
-            ],
+            "forbidden": ["_build.m", "add_block/add_line via generated script", "set_param Position outside model_edit"],
         },
     }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Create a target modeling guideline v5 Simulink layout plan JSON"
-    )
+    parser = argparse.ArgumentParser(description="Suggest a clean Simulink layout (JSON plan only)")
     parser.add_argument("spec", type=Path)
     parser.add_argument("--out", type=Path)
-    parser.add_argument(
-        "--profile",
-        type=Path,
-        default=Path(__file__).resolve().parent.parent
-        / "assets"
-        / "layout-profile.json",
-    )
+    parser.add_argument("--profile", type=Path,
+                        default=Path(__file__).resolve().parent.parent / "assets" / "layout-profile.json")
     args = parser.parse_args()
     try:
         spec = json.loads(args.spec.read_text(encoding="utf-8"))
-        profile = (
-            json.loads(args.profile.read_text(encoding="utf-8"))
-            if args.profile.exists()
-            else {}
-        )
-        spec, blocks, edges = validate_and_normalize(spec)
+        profile = json.loads(args.profile.read_text(encoding="utf-8")) if args.profile.exists() else {}
+        spec, blocks, edges = normalize(spec)
         plan = build_plan(spec, blocks, edges, profile)
         output = args.out or args.spec.with_name(args.spec.stem + "_plan.json")
-        if output.suffix.lower() != ".json":
-            output = output.with_suffix(".json")
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(
-            json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        output.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except (OSError, json.JSONDecodeError, PlanError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    print(
-        f"wrote {len(plan['blocks'])} logical blocks / "
-        f"{len(plan['edges'])} logical edges -> {output}"
-    )
-    if plan["plan_level_findings"]:
-        print(
-            f"JMAAB planning findings: {len(plan['plan_level_findings'])} "
-            "(resolve before model_edit)"
-        )
-    print("This is a plan only; edit the model with SATK model_edit.")
+    print(f"wrote {len(plan['blocks'])} blocks / {len(plan['edges'])} edges -> {output}")
+    bad = [f for f in plan["plan_level_findings"] if f["kind"].startswith("planner_")]
+    if bad:
+        print(f"WARNING: planner self-check found {len(bad)} guarantee violation(s): {bad}")
+    print("Plan only; build and place with SATK model_edit / arranging-simulink-layouts.")
     return 0
 
 

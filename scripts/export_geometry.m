@@ -1,12 +1,12 @@
 function export_geometry(scopePath, outFile)
-%EXPORT_GEOMETRY Export one Simulink scope for fail-closed target-spec v5 linting.
+%EXPORT_GEOMETRY Export one Simulink scope's appearance geometry (read-only).
 %
 %   export_geometry('Controller')
-%   export_geometry('Controller/ControlAlgorithm', 'control_geometry.json')
+%   export_geometry('Controller/Algo', 'algo_geometry.json')
 %
-% The function is read-only: it loads the model if needed, reads only direct
-% children of the requested scope, and writes scope-local geometry JSON.
-% Nested subsystem contents are intentionally excluded.
+% Only direct children of the scope are exported, in scope-local coordinates.
+% Fields are limited to what the appearance metrics need: block rects/types,
+% Goto/From tags, line polylines and endpoints, and the editor crossing style.
 
 if nargin < 1 || isempty(scopePath)
     error('export_geometry:missingScope', 'scopePath is required');
@@ -18,280 +18,119 @@ end
 
 modelName = strtok(scopePath, '/');
 load_system(modelName);
-scopePath = strtrim(scopePath);
-scopePath = regexprep(scopePath, '/+$', '');
-
+scopePath = regexprep(strtrim(scopePath), '/+$', '');
 limitations = {};
 
-% Direct blocks only. Do not use recursive coordinates from nested subsystems.
-blockHandles = find_system(scopePath, 'SearchDepth', 1, 'FindAll', 'on', ...
-    'Type', 'Block');
-blockHandles = filterDirectBlocks(blockHandles, scopePath);
-
-blocks = emptyBlocks();
+blockHandles = find_system(scopePath, 'SearchDepth', 1, 'FindAll', 'on', 'Type', 'Block');
+blocks = {};
 for k = 1:numel(blockHandles)
     bh = blockHandles(k);
-    b = oneBlock();
-    try
-        b.path = cleanText(getfullname(bh));
-        b.type = cleanText(get_param(bh, 'BlockType'));
-        b.position = numericRow(get_param(bh, 'Position'));
-        [b.orientation, b.orientation_status] = observedText(bh, 'Orientation');
-        b.shadow = observedLogical(bh, 'DropShadow');
-        if isempty(b.shadow)
-            b.shadow = observedLogical(bh, 'Shadow');
-        end
-        [b.name_placement, b.name_placement_status] = ...
-            observedText(bh, 'NamePlacement');
-        [ports, limitations] = readPorts(bh, limitations);
-        b.ports = structArrayToCell(ports);
-        b.block_type = b.type;
-        if strcmp(b.type, 'Goto') || strcmp(b.type, 'From')
-            b.goto_tag = cleanText(get_param(bh, 'GotoTag'));
-            if strcmp(b.type, 'Goto')
-                b.goto_tag_visibility = cleanText(get_param(bh, 'TagVisibility'));
-            else
-                b.goto_tag_visibility = 'not_applicable';
-            end
-        end
-        blocks(end + 1) = b; %#ok<AGROW>
-    catch ME
-        error('export_geometry:blockRead', ...
-            'Cannot export direct block %s: %s', getfullname(bh), ME.message);
+    path = cleanText(getfullname(bh));
+    if ~strcmp(parentOf(path), scopePath)
+        continue;
     end
+    b = struct('path', path, 'type', cleanText(get_param(bh, 'BlockType')), ...
+        'position', numericRow(get_param(bh, 'Position')), ...
+        'goto_tag', '', 'goto_tag_visibility', '');
+    if strcmp(b.type, 'Goto') || strcmp(b.type, 'From')
+        b.goto_tag = cleanText(get_param(bh, 'GotoTag'));
+        if strcmp(b.type, 'Goto')
+            b.goto_tag_visibility = cleanText(get_param(bh, 'TagVisibility'));
+        end
+    end
+    blocks{end + 1} = b; %#ok<AGROW>
 end
 
-% Lines directly in the selected scope. Include branches and deduplicate handles.
-try
-    lineHandles = handleNumbers(get_param(scopePath, 'Lines'));
-catch
-    lineHandles = [];
-    limitations{end + 1} = 'get_param(scope,''Lines'') did not return direct lines.';
-end
-try
-    searched = handleNumbers(find_system(scopePath, 'SearchDepth', 1, ...
-        'FindAll', 'on', 'Type', 'line'));
-    lineHandles = unique([lineHandles(:); searched(:)]);
-catch ME
-    limitations{end + 1} = sprintf('Line search limitation: %s', ME.message);
-end
-lineHandles = lineHandles(isfinite(lineHandles) & lineHandles > 0);
-
-lines = emptyLines();
+lineHandles = directLines(scopePath);
+lines = {};
 for k = 1:numel(lineHandles)
     lh = lineHandles(k);
     if ~ishandle(lh)
         continue;
     end
-    L = oneLine();
-    L.id = sprintf('line_%d', k);
-    try
-        points = get_param(lh, 'Points');
-        if isnumeric(points) && size(points, 2) == 2
-            L.points = points;
-        else
-            L.points = zeros(0, 2);
-            limitations{end + 1} = sprintf('%s has no readable Points.', L.id); %#ok<AGROW>
-        end
-
-        srcHandle = handleValue(lh, 'SrcBlockHandle');
-        if srcHandle <= 0
-            srcHandle = parentSourceHandle(lh, 0);
-        end
-        dstHandle = handleValue(lh, 'DstBlockHandle');
-        srcPortHandle = handleValue(lh, 'SrcPortHandle');
-        dstPortHandle = handleValue(lh, 'DstPortHandle');
-
-        [L.src_block, srcIndex] = resolveEndpoint(srcHandle, srcPortHandle, 'out');
-        [L.dst_block, dstIndex] = resolveEndpoint(dstHandle, dstPortHandle, 'in');
-        L.src_port = srcIndex;
-        L.dst_port = dstIndex;
-        [L.name, ~] = observedText(lh, 'Name');
-        parent = handleValue(lh, 'LineParent');
-        if parent > 0
-            L.parent_line_id = sprintf('line_%d', find(lineHandles == parent, 1));
-        end
-        L.point_frame = 'scope-local';
-        lines(end + 1) = L; %#ok<AGROW>
-    catch ME
-        error('export_geometry:lineRead', ...
-            'Cannot export line handle %g: %s', lh, ME.message);
+    points = get_param(lh, 'Points');
+    if ~isnumeric(points) || size(points, 2) ~= 2 || size(points, 1) < 2
+        limitations{end + 1} = sprintf('line %d has no readable Points', k); %#ok<AGROW>
+        continue;
     end
+    if all(all(diff(points, 1, 1) == 0, 2))
+        % Zero-length stub handle (R2025b branch connector): not a signal line.
+        continue;
+    end
+    [srcBlock, srcPort] = resolveEnd(lh, 'SrcBlockHandle', 'SrcPortHandle', 'Outport');
+    [dstBlock, dstPort] = resolveEnd(lh, 'DstBlockHandle', 'DstPortHandle', 'Inport');
+    lines{end + 1} = struct('id', sprintf('line_%d', k), 'points', points, ...
+        'src_block', srcBlock, 'src_port', srcPort, ...
+        'dst_block', dstBlock, 'dst_port', dstPort); %#ok<AGROW>
 end
 
-setting = readLineCrossingSetting();
 payload = struct();
-payload.schema_version = 'maab.simulink_geometry/v1';
-payload.standard = 'TARGET_MODELING_GUIDELINE_V5';
-payload.matlab_version = ['R' version('-release')];
+payload.schema_version = 'maab.simulink_geometry/v2';
 payload.model = modelName;
 payload.scope = scopePath;
-payload.scope_type = ternary(strcmp(scopePath, modelName), 'model', 'subsystem');
 payload.coordinate_frame = 'scope-local';
-payload.blocks = structArrayToCell(blocks);
-payload.lines = structArrayToCell(lines);
-payload.source_settings = struct('line_crossing', setting);
-payload.coverage = struct( ...
-    'direct_blocks', numel(blocks), ...
-    'direct_lines', numel(lines), ...
-    'nested_content_exported', false, ...
-    'limitations', {limitations});
-
-jsonText = jsonencode(payload, 'PrettyPrint', true);
-[fid, msg] = fopen(outFile, 'w', 'n', 'UTF-8');
-if fid < 0
-    error('export_geometry:write', 'Cannot write %s: %s', outFile, msg);
-end
-cleanup = onCleanup(@() fclose(fid));
-fprintf(fid, '%s', jsonText);
-fprintf( ...
-    'wrote scope %s: %d direct blocks / %d direct lines / %d limitations -> %s\n', ...
+payload.blocks = blocks;
+payload.lines = lines;
+payload.source_settings = struct('line_crossing', readCrossingStyle());
+payload.coverage = struct('direct_blocks', numel(blocks), ...
+    'direct_lines', numel(lines), 'limitations', {limitations});
+writeJson(outFile, payload);
+fprintf('wrote scope %s: %d blocks / %d lines / %d limitations -> %s\n', ...
     scopePath, numel(blocks), numel(lines), numel(limitations), outFile);
 end
 
-
-function handles = filterDirectBlocks(handles, scopePath)
-keep = false(size(handles));
-for k = 1:numel(handles)
-    try
-        path = cleanText(getfullname(handles(k)));
-        slash = strfind(path, '/');
-        parent = '';
-        if ~isempty(slash)
-            parent = path(1:slash(end) - 1);
-        end
-        keep(k) = strcmp(parent, scopePath);
-    catch
-        keep(k) = false;
-    end
-end
-handles = handles(keep);
-end
-
-
-function [ports, limitations] = readPorts(blockHandle, limitations)
-ports = emptyPorts();
+function handles = directLines(scopePath)
+handles = [];
 try
-    counts = get_param(blockHandle, 'Ports');
+    handles = double(get_param(scopePath, 'Lines'));
 catch
-    counts = [0 0];
-end
-inputCount = 0;
-outputCount = 0;
-if isnumeric(counts) && numel(counts) >= 2
-    inputCount = counts(1);
-    outputCount = counts(2);
+    % Root models do not expose 'Lines'; find_system covers them.
 end
 try
-    connectivity = get_param(blockHandle, 'PortConnectivity');
+    searched = find_system(scopePath, 'SearchDepth', 1, 'FindAll', 'on', 'Type', 'line');
+    handles = unique([handles(:); double(searched(:))]);
 catch ME
-    limitations{end + 1} = sprintf( ...
-        'PortConnectivity unavailable for %s: %s', ...
-        getfullname(blockHandle), ME.message);
-    return;
+    error('export_geometry:lines', 'Cannot enumerate lines of %s: %s', scopePath, ME.message);
 end
-for p = 1:numel(connectivity)
-    item = onePort();
-    item.number = p;
-    item.index = p;
-    item.type_code = cleanText(connectivity(p).Type);
-    if p <= inputCount
-        item.direction = 'in';
-    elseif p <= inputCount + outputCount
-        item.direction = 'out';
-    else
-        item.direction = 'control';
-    end
-    item.position = numericRow(connectivity(p).Position);
-    srcBlocks = handleListNames(connectivity(p).SrcBlock);
-    dstBlocks = handleListNames(connectivity(p).DstBlock);
-    item.src_blocks = srcBlocks;
-    item.dst_blocks = dstBlocks;
-    item.src_port = numericRow(connectivity(p).SrcPort);
-    item.dst_port = numericRow(connectivity(p).DstPort);
-    item.connected = ~isempty(srcBlocks) || ~isempty(dstBlocks);
-    ports(end + 1) = item; %#ok<AGROW>
-end
+handles = handles(isfinite(handles) & handles > 0);
 end
 
-
-function [blockPath, portIndex] = resolveEndpoint(blockHandle, portHandle, kind)
+function [blockPath, portIndex] = resolveEnd(lh, blockParam, portParam, portKind)
+% Branch lines report -1 handles; walk LineParent to the trunk like the
+% editor does, so branches keep the true source port (same-net identity).
 blockPath = '';
-portIndex = [];
-if blockHandle > 0 && ishandle(blockHandle)
+portIndex = 0;
+h = handleOf(lh, blockParam);
+p = handleOf(lh, portParam);
+depth = 0;
+while (h <= 0 || p <= 0) && depth < 32
+    parent = handleOf(lh, 'LineParent');
+    if parent <= 0 || ~ishandle(parent)
+        break;
+    end
+    lh = parent;
+    if h <= 0, h = handleOf(lh, blockParam); end
+    if p <= 0, p = handleOf(lh, portParam); end
+    depth = depth + 1;
+end
+if h > 0 && ishandle(h)
+    blockPath = cleanText(getfullname(h));
+end
+if h > 0 && p > 0
     try
-        blockPath = cleanText(getfullname(blockHandle));
-    catch
-        blockPath = '';
-    end
-end
-if blockHandle > 0 && ~isempty(portHandle) && portHandle > 0
-    try
-        portIndex = portNumber(blockHandle, portHandle, kind);
-    catch
-        portIndex = [];
-    end
-end
-end
-
-
-function index = portNumber(blockHandle, portHandle, kind)
-try
-    handles = get_param(blockHandle, 'PortHandles');
-    if strcmp(kind, 'in')
-        candidates = handles.Inport;
-    else
-        candidates = handles.Outport;
-    end
-    index = find(double(candidates(:)) == double(portHandle), 1);
-    if isempty(index)
-        index = [];
-    end
-catch
-    index = [];
-end
-end
-
-
-function handle = parentSourceHandle(lineHandle, depth)
-handle = -1;
-if depth > 32 || ~ishandle(lineHandle)
-    return;
-end
-source = handleValue(lineHandle, 'SrcBlockHandle');
-if source > 0 && ishandle(source)
-    handle = source;
-    return;
-end
-try
-    parent = get_param(lineHandle, 'LineParent');
-catch
-    parent = -1;
-end
-if parent > 0 && ishandle(parent)
-    handle = parentSourceHandle(parent, depth + 1);
-end
-end
-
-
-function names = handleListNames(values)
-names = {};
-if isempty(values)
-    return;
-end
-for k = 1:numel(values)
-    h = double(values(k));
-    if h > 0 && ishandle(h)
-        try
-            names{end + 1} = cleanText(getfullname(h)); %#ok<AGROW>
-        catch
+        ports = get_param(h, 'PortHandles');
+        candidates = ports.(portKind);
+        idx = find(double(candidates(:)) == double(p), 1);
+        if ~isempty(idx)
+            portIndex = idx;
         end
+    catch
+        portIndex = 0;
     end
 end
 end
 
-
-function value = handleValue(objectHandle, parameter)
+function value = handleOf(objectHandle, parameter)
 value = -1;
 try
     raw = get_param(objectHandle, parameter);
@@ -302,49 +141,35 @@ catch
 end
 end
 
-
-function [value, status] = observedText(objectHandle, parameter)
-value = '';
-status = 'unavailable';
+function setting = readCrossingStyle()
+setting = struct('status', 'unavailable', 'value', '', 'reason', '');
 try
-    raw = get_param(objectHandle, parameter);
-    if ischar(raw)
-        value = raw;
-        status = 'observed';
-    elseif isstring(raw) && isscalar(raw)
-        value = char(raw);
-        status = 'observed';
+    raw = char(string(get_param(0, 'EditorPathXStyle')));
+    if isempty(strtrim(raw))
+        setting.reason = 'EditorPathXStyle returned empty';
+    else
+        setting.status = 'observed';
+        setting.value = raw;
     end
-catch
+catch ME
+    setting.reason = ME.message;
 end
 end
 
-
-function value = observedLogical(objectHandle, parameter)
-value = [];
-try
-    raw = get_param(objectHandle, parameter);
-    if islogical(raw) || isnumeric(raw)
-        value = logical(raw(1));
-    elseif ischar(raw) || (isstring(raw) && isscalar(raw))
-        value = any(strcmpi(char(raw), {'on', 'true', '1'}));
-    end
-catch
+function parent = parentOf(path)
+slash = strfind(path, '/');
+if isempty(slash)
+    parent = '';
+else
+    parent = path(1:slash(end) - 1);
 end
 end
-
 
 function value = cleanText(value)
-if isstring(value)
-    value = char(value);
+if isstring(value), value = char(value); end
+if ~ischar(value), value = ''; end
+value = strtrim(strrep(value, newline, ''));
 end
-if ~ischar(value)
-    value = '';
-end
-value = strrep(value, newline, '');
-value = strtrim(value);
-end
-
 
 function value = numericRow(value)
 if isempty(value) || ~isnumeric(value)
@@ -354,187 +179,12 @@ else
 end
 end
 
-
-function handles = handleNumbers(value)
-handles = [];
-if isempty(value)
-    return;
+function writeJson(outFile, payload)
+jsonText = jsonencode(payload, 'PrettyPrint', true);
+[fid, msg] = fopen(outFile, 'w', 'n', 'UTF-8');
+if fid < 0
+    error('export_geometry:write', 'Cannot write %s: %s', outFile, msg);
 end
-if isnumeric(value)
-    handles = double(value(:));
-    return;
-end
-if iscell(value)
-    values = zeros(numel(value), 1);
-    for k = 1:numel(value)
-        item = value{k};
-        if isnumeric(item) || islogical(item)
-            values(k) = double(item(1));
-        elseif isobject(item)
-            values(k) = double(item);
-        else
-            error('export_geometry:handleType', ...
-                'Unsupported line handle type in cell: %s', class(item));
-        end
-    end
-    handles = values;
-    return;
-end
-if isobject(value)
-    handles = double(value(:));
-    return;
-end
-error('export_geometry:handleType', 'Unsupported line handle type: %s', class(value));
-end
-
-
-function value = structArrayToCell(value)
-if isempty(value)
-    value = {};
-    return;
-end
-value = num2cell(value);
-end
-
-
-function setting = readLineCrossingSetting()
-% Line crossing style is a Simulink editor preference, not a model parameter.
-% The UI label "Line crossing style" is exposed by the root object property
-% EditorPathXStyle. Its raw value uses codes such as grad_pin and hop.
-setting = struct( ...
-    'status', 'unavailable', ...
-    'value', '', ...
-    'display_value', '', ...
-    'source', '', ...
-    'reason', '');
-try
-    raw = get_param(0, 'EditorPathXStyle');
-    raw = char(string(raw));
-    if isempty(strtrim(raw))
-        setting.reason = 'get_param(0,''EditorPathXStyle'') returned an empty value.';
-        return;
-    end
-    setting.status = 'observed';
-    setting.value = raw;
-    setting.display_value = lineCrossingDisplay(raw);
-    setting.source = 'get_param(0,''EditorPathXStyle'')';
-catch ME
-    setting.reason = sprintf( ...
-        'get_param(0,''EditorPathXStyle'') failed: %s', ME.message);
-end
-end
-
-
-function displayValue = lineCrossingDisplay(rawValue)
-switch lower(strtrim(rawValue))
-    case 'hop'
-        displayValue = 'Line Hop';
-    case 'grad_pin'
-        displayValue = 'Tunnel';
-    case 'none'
-        displayValue = 'None';
-    otherwise
-        displayValue = rawValue;
-end
-end
-
-
-function value = ternary(condition, whenTrue, whenFalse)
-if condition
-    value = whenTrue;
-else
-    value = whenFalse;
-end
-end
-
-
-function value = emptyBlocks()
-value = repmat(struct( ...
-    'path', '', ...
-    'type', '', ...
-    'block_type', '', ...
-    'position', [], ...
-    'orientation', '', ...
-    'orientation_status', '', ...
-    'shadow', [], ...
-    'name_placement', '', ...
-    'name_placement_status', '', ...
-    'goto_tag', '', ...
-    'goto_tag_visibility', '', ...
-    'ports', emptyPorts()), 0, 1);
-end
-
-
-function value = oneBlock()
-value = struct( ...
-    'path', '', ...
-    'type', '', ...
-    'block_type', '', ...
-    'position', [], ...
-    'orientation', '', ...
-    'orientation_status', '', ...
-    'shadow', [], ...
-    'name_placement', '', ...
-    'name_placement_status', '', ...
-    'goto_tag', '', ...
-    'goto_tag_visibility', '', ...
-    'ports', emptyPorts());
-end
-
-
-function value = emptyPorts()
-value = repmat(struct( ...
-    'number', [], ...
-    'index', [], ...
-    'type_code', '', ...
-    'direction', '', ...
-    'position', [], ...
-    'src_blocks', {{}}, ...
-    'dst_blocks', {{}}, ...
-    'src_port', [], ...
-    'dst_port', [], ...
-    'connected', []), 0, 1);
-end
-
-
-function value = onePort()
-value = struct( ...
-    'number', [], ...
-    'index', [], ...
-    'type_code', '', ...
-    'direction', '', ...
-    'position', [], ...
-    'src_blocks', {{}}, ...
-    'dst_blocks', {{}}, ...
-    'src_port', [], ...
-    'dst_port', [], ...
-    'connected', []);
-end
-
-
-function value = emptyLines()
-value = repmat(struct( ...
-    'id', '', ...
-    'points', [], ...
-    'src_block', '', ...
-    'src_port', [], ...
-    'dst_block', '', ...
-    'dst_port', [], ...
-    'name', '', ...
-    'parent_line_id', '', ...
-    'point_frame', ''), 0, 1);
-end
-
-
-function value = oneLine()
-value = struct( ...
-    'id', '', ...
-    'points', [], ...
-    'src_block', '', ...
-    'src_port', [], ...
-    'dst_block', '', ...
-    'dst_port', [], ...
-    'name', '', ...
-    'parent_line_id', '', ...
-    'point_frame', '');
+cleanup = onCleanup(@() fclose(fid));
+fprintf(fid, '%s', jsonText);
 end

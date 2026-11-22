@@ -54,6 +54,16 @@ def draw_state(ax, state: dict, depth: int) -> None:
                                edgecolor="#5b7fa6", facecolor="none", zorder=3 + depth))
 
 
+def draw_junction(ax, junction: dict) -> None:
+    center = junction.get("center")
+    if not center or len(center) < 2:
+        return
+    radius = float(junction.get("radius") or 5)
+    ax.add_patch(plt.Circle((float(center[0]), float(center[1])), radius,
+                            linewidth=1.2, edgecolor="#1f4e79",
+                            facecolor="#ffffff", zorder=5))
+
+
 def draw_transition(ax, transition: dict) -> None:
     points = []
     for key in ("source_endpoint",):
@@ -101,6 +111,8 @@ def render(geo: dict, out_file: Path, dpi: int) -> None:
     states.sort(key=lambda s: 0 if s.get("parent_kind") == "chart" else 1)
     for depth, state in enumerate(states):
         draw_state(ax, state, depth)
+    for junction in geo.get("junctions") or []:
+        draw_junction(ax, junction)
     for transition in geo.get("transitions") or []:
         draw_transition(ax, transition)
 

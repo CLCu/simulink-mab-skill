@@ -1,158 +1,34 @@
 {
-  "schema_version": "2.1",
-  "standard": "TARGET_MODELING_GUIDELINE_V5",
-  "profiles": [
-    "NA-MAAB",
-    "JMAAB"
-  ],
+  "schema_version": "3.0",
+  "purpose": "布局手艺默认值。项目可调数值，不是目标规范强制要求。",
   "matlab_version": "R2025b",
-  "source": "project-template-placeholder",
-  "_note": "此文件保存项目决定值，不代表目标规范强制数值。真实项目应把 source 改为项目模板、配置库或批准文件。",
-  "grid": {
-    "value": 10,
-    "status": "provisional",
-    "rule_context": [
-      "na_0004"
-    ]
-  },
+  "grid": 10,
   "block": {
-    "preferred_width": 40,
-    "preferred_height": 40,
-    "status": "layout-default",
-    "recognizability": "jm_0002 requires visual confirmation and has no numeric target-standard threshold"
+    "width": 40,
+    "height": 40,
+    "port_width": 30,
+    "port_height": 14
   },
   "spacing": {
     "horizontal": 60,
     "vertical": 40,
-    "branch": 20,
-    "status": "provisional",
-    "purpose": "avoid overlapping lines, labels and blocks"
+    "margin": 40,
+    "lane_gap": 20
   },
-  "font": {
-    "block_name": {
-      "name": "Arial",
-      "size": 10,
-      "status": "provisional"
-    },
-    "signal_name": {
-      "name": "Arial",
-      "size": 10,
-      "status": "provisional"
-    },
-    "stateflow_label": {
-      "name": "Arial",
-      "size": 10,
-      "status": "provisional"
-    }
+  "goto_from": {
+    "budget_tiers": [[20, 1], [60, 2], [null, 3]],
+    "hard_cap": 3,
+    "max_froms_per_tag": 2,
+    "tag_visibility": "local",
+    "forbid_inport_to_goto": true,
+    "forbid_from_to_goto_chaining": true
   },
-  "appearance": {
-    "shadow": false,
-    "block_name_placement": "below",
-    "show_block_annotation": false,
-    "display_options": {},
-    "status": "provisional"
+  "residual": {
+    "max_crossing_events": 2,
+    "max_involved_lines": 2,
+    "note": "几何手段穷尽后允许书面遗留的极小残留；交付报告列出线对与实际 crossing style，并逐张 PNG 复核。"
   },
-  "line_crossing": {
-    "required_on_crossing": "line hop",
-    "source_rule": "db_0032-a2",
-    "observed_from_model": false,
-    "note": "不得用此 profile 值代替模型/环境实际设置"
-  },
-  "appearance_quality": {
-    "policy_id": "project-visual-quality-v2",
-    "status": "project-policy",
-    "note": "零交叉/零重叠/零穿块/零斜线的项目外观目标，不是目标规范新增规则；Goto/From 由 goto_from_policy 限额与裁决证据管辖；Line Hop 不影响 crossing_events 计数。",
-    "routing_constraint": "禁止为布局整改大面积新增 Goto/From；仅在几何手段穷尽后按 goto_conversion_candidates 裁决转换，且不得超过 scope 预算；禁止 Inport 直连 Goto。",
-    "scope_coverage": "all_nested_simulink_scopes_with_direct_geometry",
-    "line_metrics": {
-      "length_unit": "Simulink geometry coordinate units",
-      "bends": "direction changes after removing duplicate and collinear vertices",
-      "aggregation": "sum by scope, never compare coordinates across scopes"
-    },
-    "detection_response": {
-      "crossing_trigger": "crossing_events > 0 enters repair workflow",
-      "priority": "hotspots and top_crossing_groups",
-      "max_rounds_without_net_improvement": 3,
-      "line_hop_closes_gate": false,
-      "goto_from_is_layout_fix": "bounded_last_resort"
-    },
-    "absolute_limits": {
-      "crossing_events": 0,
-      "overlap_events": 0,
-      "through_block_events": 0,
-      "diagonal_segments": 0
-    },
-    "goto_from_policy": {
-      "enabled": true,
-      "budget_tiers": [
-        {
-          "max_functional_blocks": 20,
-          "max_pairs": 1
-        },
-        {
-          "max_functional_blocks": 60,
-          "max_pairs": 2
-        },
-        {
-          "max_functional_blocks": null,
-          "max_pairs": 3
-        }
-      ],
-      "hard_cap_pairs": 3,
-      "max_froms_per_tag": 2,
-      "tag_visibility": "local",
-      "forbid_inport_to_goto": true,
-      "forbid_from_to_goto_chaining": true,
-      "require_paired": true,
-      "require_justification": true,
-      "min_candidate_line_length": 100,
-      "placement": "Goto 紧贴源块、From 紧贴消费者块；tag 使用信号名；每 tag 的 From 不超过 2 个",
-      "note": "预算按功能块数（不含 Goto/From/annotation）精确匹配 tiers；每个新增 tag 必须绑定 maab.goto_justification/v1 证据（reason + eliminated_crossings），否则门禁 FAIL。"
-    },
-    "existing_scope": {
-      "require_baseline": true,
-      "max_delta": {
-        "crossing_events": 0,
-        "overlap_events": 0,
-        "through_block_events": 0,
-        "diagonal_segments": 0
-      }
-    },
-    "line_hop": {
-      "counts_as_crossing": true,
-      "allowed_as_spec_fallback": true,
-      "allowed_as_appearance_pass": false,
-      "residual_waiver": {
-        "max_crossing_events": 2,
-        "max_involved_lines": 2,
-        "requires_goto_budget_exhausted": true,
-        "requires_geometry_exhausted_attestation": true,
-        "requires_hop_observed": true,
-        "note": "仅当残留交叉 ≤2 处且涉及 ≤2 条线、实际 crossing style 为 hop、Goto 预算已耗尽且有书面裁决时条件放行；MANUAL 逐张 PNG 复核关闭，大面积 hop 禁止。"
-      }
-    },
-    "acceptance_order": [
-      "crossing_events",
-      "overlap_events",
-      "through_block_events",
-      "diagonal_segments",
-      "goto_from_blocks",
-      "total_bends",
-      "total_length"
-    ],
-    "diagnostic_only": [
-      "total_bends",
-      "total_length"
-    ],
-    "visual_review": {
-      "required": true,
-      "authority": "current-scope render_check PNG"
-    }
-  },
-  "layout": {
-    "flow": "left-to-right",
-    "parallel_order": "top-to-bottom",
-    "max_branch_per_point_jmaab": 2,
-    "max_unnecessary_bends": null
+  "repair": {
+    "max_rounds_without_improvement": 3
   }
 }
