@@ -4,7 +4,7 @@ description: 在 MATLAB R2025b 中搭建、修改或新建 Simulink/Stateflow �
 metadata:
   author: luchao
   date: "2026-11-22"
-  version: "2.0.0"
+  version: "2.0.1"
 ---
 # Simulink / Stateflow 外观布局
 
@@ -12,7 +12,7 @@ metadata:
 
 - 搭建、修改、新建 Simulink/Stateflow 模型，或用户要求图面好看/布局规范时触发。
 - 仅要求复查已有模型而不修改时，不进入执行主链。
-- 交付目标是**好看的图**：连线清楚、无交叉/重叠/穿块/斜线、标签与块可辨识。
+- 交付目标是好看的图：连线清楚、最小化交叉/重叠/穿块/斜线、标签与块可辨识。
 - 本 Skill 不证明任何建模规范合规，不判定功能/数据/代码生成正确性。完成时只描述外观结果，不写“符合 XX 规范”。
 
 ## 工作路径
@@ -33,7 +33,7 @@ metadata:
 - 建模型/改结构/移动块只走 SATK `model_edit` 与 `arranging-simulink-layouts`；不得用 `evaluate_matlab_code`、生成脚本 `add_block/add_line` 或 `set_param Position` 绕过。
 - `layout_plan.py` 只输出 JSON plan；最终版面以实际模型重新导出的度量为准，不以 plan 坐标为准。
 - 一个物理输出端口供多个消费者时共享同一端点，不得造 `S/2`、`S/3` 伪端口。
-- Goto/From 是几何手段穷尽后的受限最后手段：每 scope 预算按功能块数 ≤20→1 对、≤60→2 对、>60→3 对（硬上限 3）；`TagVisibility=local`、tag 用信号名、Goto 紧贴源、From 紧贴消费者、每 tag From ≤2；禁止 Inport 直连 Goto、From→Goto 链、未配对 Goto/From。不得用其隐藏扇出或大面积刷零交叉。
+- Goto/From 优先用于跨子系统且长距离（超长）的信号线 ，同一 scope 内不得超过 3 对。每个 tag 的 From ≤2；TagVisibility=local；tag 用信号名；Goto 紧贴源、From 紧贴消费者；禁止 Inport 直连 Goto、From→Goto 链、未配对 Goto/From。
 - `repair_suggest.py` 的结构级建议（`restructure_branch_tree`、`goto_from_conversion`，带 `requires_consent:true`）必须先取得用户明确同意再经 SATK 应用；坐标/端口级建议（phase 1）可直接应用但仍每轮一条+度量裁判。
 - 已有模型：第一次布局修改前导出全层级 baseline；修改后四计数与 Goto 对数相对 baseline 不得增加。
 - 度量未运行、导出失败或 schema 无效（退出码 2）时不得写成通过；修导出器/输入后重跑。
